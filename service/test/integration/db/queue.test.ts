@@ -86,6 +86,23 @@ describe('claimTask', () => {
     for (const c of claims) expect(c.pricePerNight).toBe(100); // the head: the first accepted
   });
 
+  it('Q11 / D6: a head row locked by another transaction does not block claiming other accommodations', async () => {
+    const locked = await accept({ accommodationId: 'acc-1001' });
+    const free = await accept({ accommodationId: 'acc-1002' });
+    const holder = await db.pool().connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT id FROM sync_tasks WHERE update_id = $1 FOR UPDATE', [locked]);
+      const started = Date.now();
+      const claimed = await claim();
+      expect(claimed?.updateId).toBe(free);
+      expect(Date.now() - started).toBeLessThan(1_000); // skipped, not waited for
+    } finally {
+      await holder.query('ROLLBACK');
+      holder.release();
+    }
+  });
+
   it('Q5 / D6, AC7: a task whose lease expired is claimable again', async () => {
     await accept();
     const first = await claim();

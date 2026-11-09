@@ -62,6 +62,7 @@ The claim query of SPEC D6 plus the three outcomes. Each claim returns a **fenci
 | Q8 | `reschedule` | Stays `pending`, lease cleared, `next_attempt_at`, `last_error`, `last_http_status` set |
 | Q9 / D4 | `fail` | The task **and the pending siblings of the same update** become `failed`, with the same error, in **one transaction**; the accommodation's next update becomes the head |
 | Q10 / D6 | A stale token (the lease expired and another worker re-claimed it) | `complete`/`reschedule`/`fail` is a no-op that returns `false`; the newer claim wins |
+| Q11 / D6 | A head row locked by another transaction (a slot mid-claim) — *added after mutation testing: removing `SKIP LOCKED` survived Q4, because Postgres waits and re-evaluates* | Another accommodation's head is claimed **immediately**, not after the lock is released |
 
 ## 4. Rate limiter additions — `src/portal/rate-limiter.ts` (U)
 
@@ -82,7 +83,7 @@ The claim query of SPEC D6 plus the three outcomes. Each claim returns a **fenci
 | L4 / **AC6** | The same with `PORTAL_MAX_REQUESTS_PER_MINUTE=60` (deliberately above the portal's 30) | `429`s happen. After each one, **no request reaches the portal before its `Retry-After` has elapsed**, checked against the worker's recorded `Retry-After` values and the admin log timestamps. Everything still syncs |
 | L5 / **AC7** | Accept updates; run the worker briefly; `stop()` mid-way; also leave one task with a lease as if its worker had crashed; start a **new** worker | Everything ends `done` and the portal state is correct; the crashed task is retried after its lease expires |
 | L6 / **AC8** | `PORTAL_TIMEOUT_MS` near the portal's median latency (see Q5), so that many requests time out, some of them after the portal applied them | Every update still converges to the correct final state (idempotent PUT + retry) |
-| L7 / **AC9** | An update for `acc-9999` (does not exist) between two valid updates of other accommodations, and one valid update after it for the same id | The `acc-9999` update is `failed` after **exactly 1** portal request for it, with `lastError` from the portal; the others sync; nothing waits on it |
+| L7 / **AC9** | An update for `acc-9999` (does not exist) between two valid updates of other accommodations, and one valid update after it for the same id | The `acc-9999` update is `failed` with `lastError` from the portal, and **no request is sent for it after its 404** (*changed while writing the test: the portal answers random 503s even for unknown ids, so "exactly 1 request" would be flaky*); the others sync; nothing waits on it |
 | L8 / D5 | `WORKER_CONCURRENCY=3`, 6 accommodations with work (admin log) | Never more than 3 PUTs overlapping in time, never 2 for one accommodation |
 | L9 | `stop()` while slots are waiting for a permit and one request is in flight | Waiting slots stop promptly (abort); the in-flight request finishes and its outcome is stored; `stop()` resolves; no claim afterwards |
 | L10 (I-db + fake client) | An idle worker with an empty queue for several poll intervals | **Consumes no permits** (the limiter still has its full window); no portal calls |
