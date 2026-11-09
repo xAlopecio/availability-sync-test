@@ -73,6 +73,14 @@ The agent is required to find at least 3 risks, so not every risk is a real prob
 - Planned branches: `feature/setup`, `feature/core`, `feature/api`, `feature/worker`, `feature/metrics`, `feature/e2e`, `docs/process`.
 - Small Conventional Commits (`feat:`, `test:`, `fix:`, `refactor:`, `docs:`, `chore:`), with a scope when useful (`feat(worker): …`). In TDD, the failing test and its implementation may be separate commits.
 - Integrate through GitHub PRs into `develop` (`gh pr create --base develop`). CI (`.github/workflows/ci.yml`) runs `npm run check` on every PR and must be green. The user reviews and merges.
+- **PR descriptions are detailed** (in English), with these sections:
+  1. **Summary**: what the block delivers and why. Link the SPEC sections and ACs it covers.
+  2. **What's included**: changes grouped by area, naming the key files.
+  3. **Decisions and trade-offs**: choices made inside the block and their alternatives. Any SPEC change and its version.
+  4. **Review**: the `review` agent's decision and root risk; what was addressed (with commits), accepted or deferred. The full table also goes as a PR comment.
+  5. **Verification**: commands run and results (`npm run check`, CI, integration tests, `verify-portal` checks).
+  6. **Out of scope / follow-ups**: what is deliberately left for later blocks.
+  7. **How to review**: suggested reading order, and the commit list.
 
 ## Documentation rules
 
