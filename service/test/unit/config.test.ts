@@ -138,6 +138,10 @@ describe('loadConfig', () => {
     );
   });
 
+  it('K2: PORT=0 is allowed (the OS picks a free port)', () => {
+    expect(loadConfig({ PORT: '0' }).port).toBe(0);
+  });
+
   it('K8: MAX_UPDATE_RANGE_DAYS defaults to 366 and can be overridden', () => {
     expect(loadConfig({}).maxUpdateRangeDays).toBe(366);
     expect(loadConfig({ MAX_UPDATE_RANGE_DAYS: '31' }).maxUpdateRangeDays).toBe(31);

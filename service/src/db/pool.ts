@@ -32,3 +32,26 @@ export function createPool(
     },
   });
 }
+
+/**
+ * Waits until the database answers, retrying with backoff (250 ms doubling, capped at 2 s) for at
+ * most `timeoutMs`. Throws the last error when the window is over (SPEC §8, startup).
+ */
+export async function waitForDatabase(
+  pool: pg.Pool,
+  options: { timeoutMs: number; onRetry?: (error: unknown, attempt: number) => void },
+): Promise<void> {
+  const deadline = Date.now() + options.timeoutMs;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await pool.query('SELECT 1');
+      return;
+    } catch (error) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw error;
+      options.onRetry?.(error, attempt);
+      const delay = Math.min(250 * 2 ** (attempt - 1), 2_000, remaining);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}

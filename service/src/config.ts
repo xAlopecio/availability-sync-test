@@ -5,6 +5,8 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 export type Config = {
   readonly port: number;
   readonly databaseUrl: string;
+  /** How long startup keeps retrying an unreachable database before exiting (SPEC §8). */
+  readonly databaseStartupTimeoutMs: number;
   readonly logLevel: LogLevel;
   readonly maxUpdateRangeDays: number;
   readonly portal: {
@@ -62,7 +64,8 @@ export function loadConfig(env: Env): Config {
     return raw.replace(/\/+$/, '');
   };
 
-  const port = int('PORT', 3000, 1, 65535);
+  // 0 is valid: the OS picks a free port (the process tests rely on it).
+  const port = int('PORT', 3000, 0, 65535);
   const databaseUrl = url('DATABASE_URL', 'postgres://sync:sync@localhost:5432/sync', [
     'postgres:',
     'postgresql:',
@@ -86,6 +89,7 @@ export function loadConfig(env: Env): Config {
   const config: Config = {
     port,
     databaseUrl,
+    databaseStartupTimeoutMs: int('DATABASE_STARTUP_TIMEOUT_MS', 30000),
     logLevel: logLevel as LogLevel,
     maxUpdateRangeDays: int('MAX_UPDATE_RANGE_DAYS', 366),
     portal: {

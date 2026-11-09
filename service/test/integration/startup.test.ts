@@ -62,7 +62,7 @@ describe('service process', () => {
     expect(await status.json()).toMatchObject({ status: 'pending', pendingUpdates: 1 });
   });
 
-  it('W2: SIGTERM closes the server and the pool, and exits with code 0', async () => {
+  it('W2: SIGTERM closes the server, then the pool, and exits with code 0', async () => {
     service = startService({ DATABASE_URL: databaseUrl(dbName) });
     const baseUrl = await withTimeout(service.listening, 15_000, 'listening');
     expect(await connectionsTo(dbName)).toBeGreaterThan(0);
@@ -73,7 +73,14 @@ describe('service process', () => {
       signal: null,
     });
     await expect(postUpdate(baseUrl)).rejects.toThrow(); // nothing listening any more
-    expect(await connectionsTo(dbName)).toBe(0); // the pool was closed
+    // Counting connections after exit proves nothing (the OS closes them on any exit), so check
+    // that the graceful sequence actually ran, in order.
+    const steps = jsonLines(service.lines)
+      .map((l) => l['msg'])
+      .filter((m) =>
+        ['shutting down', 'http server closed', 'database pool closed'].includes(String(m)),
+      );
+    expect(steps).toEqual(['shutting down', 'http server closed', 'database pool closed']);
   });
 
   it('W3: with the database unreachable it retries, then exits non-zero without ever listening', async () => {

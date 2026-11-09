@@ -20,6 +20,7 @@ Status: **v1, approved by the author** (2026-11-09). The decisions in §8 are cl
 |---|---|---|
 | K1 | Empty environment | All SPEC §8 defaults |
 | K2 | Every variable overridden with a valid value | Parsed values (numbers as numbers) |
+| K2b | `PORT=0` — *added when W1 failed: the process tests listen on a free port* | Allowed (the OS picks the port) |
 | K3 | Invalid numbers: `abc`, `""`, `-1`, `0` where it must be > 0, `1.5` where it must be an integer | Throws; the message names each invalid variable, **all of them at once** |
 | K4 | `PORTAL_BASE_URL`: not a URL → error; trailing slash `http://x:4000/` → `http://x:4000` | As stated |
 | K5 | `TASK_LEASE_MS` ≤ `PORTAL_TIMEOUT_MS` (cross-field, SPEC D6: the lease must outlive the request) | Throws |
