@@ -22,7 +22,7 @@ source ~/.nvm/nvm.sh && nvm use
 |---|---|
 | `reset` | `POST /__admin/reset`: initial data, empty log, rate-limit counter reset. |
 | `log [accId]` | Summary of `/__admin/requests`: counts by status, and per request the time, method, path, body, status, duration and time since the last 429. The portal log does not record `Retry-After`, so compare against the `Retry-After` values in the service logs. |
-| `state <accId> <from> <to>` | Day-by-day state in the portal. Costs **one rate-limited request**. |
+| `state <accId> [from] [to]` | Day-by-day state in the portal (all 90 days if no range is given; `to` defaults to `from`). Costs **one rate-limited request**. |
 
 ## Procedure
 1. `reset`.
