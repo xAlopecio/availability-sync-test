@@ -1,4 +1,4 @@
-import type { IsoDate } from './dates.ts';
+import { addDays, daysInclusive, type IsoDate } from './dates.ts';
 
 export type DateRange = { readonly from: IsoDate; readonly to: IsoDate };
 
@@ -7,9 +7,20 @@ export const PORTAL_MAX_DAYS_PER_REQUEST = 31;
 
 /** Splits `[from, to]` into consecutive chunks of at most `maxDays` days, both ends included. */
 export function splitRange(
-  _from: IsoDate,
-  _to: IsoDate,
-  _maxDays: number = PORTAL_MAX_DAYS_PER_REQUEST,
+  from: IsoDate,
+  to: IsoDate,
+  maxDays: number = PORTAL_MAX_DAYS_PER_REQUEST,
 ): DateRange[] {
-  throw new Error('not implemented');
+  if (daysInclusive(from, to) < 1) {
+    throw new RangeError(`splitRange: to (${to}) is earlier than from (${from})`);
+  }
+  const chunks: DateRange[] = [];
+  let start = from;
+  while (daysInclusive(start, to) > maxDays) {
+    const end = addDays(start, maxDays - 1);
+    chunks.push({ from: start, to: end });
+    start = addDays(end, 1);
+  }
+  chunks.push({ from: start, to });
+  return chunks;
 }
