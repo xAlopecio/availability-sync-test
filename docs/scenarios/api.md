@@ -23,6 +23,7 @@ Status: **v1, approved by the author** (2026-11-09). The decisions in §8 are cl
 | K3 | Invalid numbers: `abc`, `""`, `-1`, `0` where it must be > 0, `1.5` where it must be an integer | Throws; the message names each invalid variable, **all of them at once** |
 | K4 | `PORTAL_BASE_URL`: not a URL → error; trailing slash `http://x:4000/` → `http://x:4000` | As stated |
 | K5 | `TASK_LEASE_MS` ≤ `PORTAL_TIMEOUT_MS` (cross-field, SPEC D6: the lease must outlive the request) | Throws |
+| K5b | `RETRY_MAX_MS` < `RETRY_BASE_MS` — *added while writing the tests: the backoff ceiling would be below its base* | Throws |
 | K6 | `LOG_LEVEL` not a pino level | Throws |
 | K7 | `PORTAL_MAX_REQUESTS_PER_MINUTE` above 30 | **Allowed**: AC6 needs it to provoke 429s |
 | K8 | `MAX_UPDATE_RANGE_DAYS` (see Q6) | Default 366; passed to `validateUpdateRequest` |
