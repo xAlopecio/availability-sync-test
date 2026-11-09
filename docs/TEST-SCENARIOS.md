@@ -107,6 +107,7 @@ A sliding window of `limit` request starts per `windowMs` (default 25 per 60 s),
 | R6 | A shorter pause after a longer one | does not shorten the longer pause |
 | R7 | `limit = 1` | works (edge case) |
 | R8 | Async `acquire()`: 3 concurrent callers, `limit = 2` (fake timers) | 2 resolve immediately; the third only once the window frees a permit; never more than `limit` |
+| R9 | Invalid configuration: `limit` not a positive integer, `windowMs` ≤ 0 — *added while writing the tests, after C11* | throws `RangeError` |
 
 ## 7. Sync status derivation — `domain/sync-status.ts` (supports AC12)
 
