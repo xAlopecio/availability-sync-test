@@ -62,10 +62,11 @@ An update is stored together with its chunks (`sync_tasks`) in the same transact
 | Outcome | Class | Action |
 |---|---|---|
 | 2xx | success | Task `done`. |
-| 429 | transient | Reschedule at `Retry-After`; **pause all sends** until then. |
+| 429 | transient | Reschedule at `Retry-After` + 500 ms safety margin (60 s if the header is missing or invalid; capped at 10 min, since one bogus header must not freeze every send); **pause all sends** until then. |
 | 503, timeout, network error, 5xx | transient | Reschedule with exponential backoff and full jitter (base 1 s, cap 5 min). |
+| Any other status (4xx not listed here, 1xx, 3xx) | transient (unexpected) | Retry with backoff, labelled `unexpected_status`, and alert. Not documented by the portal, so dropping the update would lose it; a persistent one shows up in the oldest-pending age. |
 | 401 | transient (config) | Retry with backoff. A wrong key is fixable without losing the queue; alert immediately. |
-| 400, 404, other 4xx | permanent | Task `failed`. The update's remaining chunks become `failed` too (they would fail the same way: dates are pre-validated). This unblocks the accommodation's queue. |
+| 400, 404 | permanent | Task `failed`. The update's remaining chunks become `failed` too (they would fail the same way: dates are pre-validated). This unblocks the accommodation's queue. |
 
 Transient failures are retried **without limit**: capping attempts would mean dropping accepted updates. A task that retries forever is surfaced by the oldest-pending-age metric and alert instead (§7).
 
@@ -130,10 +131,10 @@ An update's status is **derived** from its tasks: `failed` if any task failed, `
 
 ### `POST /updates`
 Body as in the README. Validation:
-- `accommodationId`: non-empty string.
+- `accommodationId`: matches `^[A-Za-z0-9_-]{1,64}$`. The id goes into the portal's URL path, so `/`, `..` or spaces must never reach it.
 - `from` and `to`: real `YYYY-MM-DD` dates, with `to >= from` and a range of at most 366 days (configurable).
 - `available`: boolean.
-- `pricePerNight`: finite number, ≥ 0, with at most 2 decimals.
+- `pricePerNight`: finite number, from 0 to 1,000,000, with at most 2 decimals.
 - Unknown fields are rejected.
 
 | Response | When |
@@ -161,6 +162,7 @@ Body as in the README. Validation:
 ```
 
 - `status`: `pending` if any update is pending; otherwise `failed` if the most recent update failed; otherwise `synced`.
+  *Known limitation, accepted:* an older failed update over days that a newer synced update does not cover would read `synced`. Only `400` and `404` are permanent: `400` is prevented by our own validation, and `404` (unknown accommodation) fails every update of that accommodation alike, so the case needs a bug to happen.
 - `recentUpdates`: the last 20, newest first.
 - An accommodation with no updates returns `404`.
 
@@ -176,7 +178,7 @@ Body as in the README. Validation:
 |---|---|---|
 | `sync_tasks_pending` | gauge (from DB at scrape) | Backlog size. |
 | `sync_oldest_pending_task_age_seconds` | gauge (from DB at scrape) | Is anything stuck? |
-| `portal_requests_total{outcome}` | counter | `success`, `rate_limited`, `unavailable`, `timeout`, `network_error`, `client_error`, `unauthorized`, `server_error`. |
+| `portal_requests_total{outcome}` | counter | `success`, `rate_limited`, `unavailable`, `timeout`, `network_error`, `client_error`, `unauthorized`, `server_error`, `unexpected_status`. |
 | `portal_request_duration_seconds{outcome}` | histogram | Portal latency. |
 | `sync_retries_total{reason}` | counter | Retry volume and cause. |
 | `sync_tasks_finished_total{result}` | counter | `done` or `failed`. |
@@ -192,6 +194,7 @@ Body as in the README. Validation:
 | Bad credentials | `increase(portal_requests_total{outcome="unauthorized"}[5m]) > 0` | critical |
 | Portal degraded | non-success ratio > 50 % over 10m (baseline is about 25 %) | warning |
 | Unexpected throttling | `increase(…{outcome="rate_limited"}[10m]) > 0` (our limiter should prevent it) | warning |
+| Unexpected portal responses | `increase(…{outcome="unexpected_status"}[10m]) > 0` (undocumented status, retried) | warning |
 | Permanent failures | `increase(sync_tasks_finished_total{result="failed"}[15m]) > 0` | warning |
 | Portal slow | p95 `portal_request_duration_seconds` > 3 s for 10m | warning |
 
@@ -252,3 +255,5 @@ Per-day desired state with coalescing (replacing D1); shared rate limiter for mu
 
 ### Changelog
 - v1: initial spec.
+- v2: decisions taken while defining the core test scenarios (`docs/TEST-SCENARIOS.md`): `accommodationId` pattern (it goes into the portal URL path), maximum price of 1,000,000, and for a 429 a +500 ms margin after `Retry-After` with a 60 s fallback when the header is missing.
+- v3: changes from the `feature/core` review. Only `400`/`404` are permanent; any other undocumented status is retried as `unexpected_status`, with an alert, so it cannot drop an accepted update. `Retry-After` is capped at 10 min. The known `sync-status` limitation is documented.
