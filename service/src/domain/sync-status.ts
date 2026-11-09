@@ -5,8 +5,9 @@ export type UpdateStatus = 'pending' | 'synced' | 'failed';
 export type NonEmpty<T> = readonly [T, ...T[]];
 
 /** SPEC §5: failed if any task failed, synced if all are done, otherwise pending. */
-export function deriveUpdateStatus(_tasks: NonEmpty<TaskStatus>): UpdateStatus {
-  throw new Error('not implemented');
+export function deriveUpdateStatus(tasks: NonEmpty<TaskStatus>): UpdateStatus {
+  if (tasks.includes('failed')) return 'failed';
+  return tasks.every((task) => task === 'done') ? 'synced' : 'pending';
 }
 
 /**
@@ -14,7 +15,10 @@ export function deriveUpdateStatus(_tasks: NonEmpty<TaskStatus>): UpdateStatus {
  * `updateId`) failed; otherwise synced. `null` when the accommodation has no updates.
  */
 export function deriveAccommodationStatus(
-  _updates: readonly { readonly updateId: number; readonly status: UpdateStatus }[],
+  updates: readonly { readonly updateId: number; readonly status: UpdateStatus }[],
 ): UpdateStatus | null {
-  throw new Error('not implemented');
+  if (updates.length === 0) return null;
+  if (updates.some((update) => update.status === 'pending')) return 'pending';
+  const latest = updates.reduce((a, b) => (b.updateId > a.updateId ? b : a));
+  return latest.status;
 }
