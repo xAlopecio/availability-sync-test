@@ -1,3 +1,4 @@
+import { connect } from 'node:net';
 import { describe, expect, it } from 'vitest';
 import { buildApp } from '#src/http/app.ts';
 import { createPool } from '#src/db/pool.ts';
@@ -193,5 +194,40 @@ describe('POST /updates', () => {
       const key = ('Az09_-.:' as string).repeat(16);
       expect((await post(readme, { 'idempotency-key': key })).statusCode).toBe(202);
     });
+  });
+
+  it('H11: a malformed HTTP request gets 400 in our error shape (raw socket)', async () => {
+    const live = buildApp({ pool: db.pool(), maxUpdateRangeDays: 366, logger: false });
+    await live.listen({ port: 0, host: '127.0.0.1' });
+    try {
+      const { port } = live.server.address() as { port: number };
+      const raw = await new Promise<string>((resolve, reject) => {
+        const socket = connect(port, '127.0.0.1', () =>
+          socket.write('NOT A VALID REQUEST LINE\r\n\r\n'),
+        );
+        let data = '';
+        socket.on('data', (chunk) => (data += chunk.toString('utf8')));
+        socket.on('end', () => resolve(data));
+        socket.on('error', reject);
+      });
+      expect(raw).toMatch(/^HTTP\/1\.1 400/);
+      const body = raw.slice(raw.indexOf('\r\n\r\n') + 4);
+      expect(errorCodeOf(JSON.parse(body))).toBe('BAD_REQUEST');
+    } finally {
+      await live.close();
+    }
+  });
+
+  it('H12: a body with __proto__ is 400 INVALID_BODY with an accurate message', async () => {
+    const res = await post('{"__proto__":{"admin":true},"accommodationId":"acc-1003"}');
+    expect(res.statusCode).toBe(400);
+    expect(errorCodeOf(res.json())).toBe('INVALID_BODY');
+    expect(res.json().error.message).toMatch(/forbidden|__proto__|prototype/i);
+    expect(res.json().error.message).not.toMatch(/not valid JSON/i);
+  });
+
+  it('H12: a malformed-JSON message says it once, without a duplicated prefix', async () => {
+    const message: string = (await post('{"accommodationId":')).json().error.message;
+    expect(message.match(/not valid JSON/gi) ?? []).toHaveLength(1);
   });
 });
