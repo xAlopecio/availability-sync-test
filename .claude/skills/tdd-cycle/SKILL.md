@@ -18,11 +18,11 @@ Work on a `feature/*` branch, never on `develop` or `master`. Run every command 
 
 ## 3. Green
 - Write the **minimum** code to pass. No speculative options and no unrequested features.
-- `npm test` and `npm run typecheck` must both pass.
-- Commit: `feat(<scope>): <behaviour>`.
+- `npm run check` (typecheck, lint, format and unit tests) must pass.
+- Run the pre-commit review (`review` agent, see `CLAUDE.md`), then commit: `feat(<scope>): <behaviour>`.
 
 ## 4. Refactor
-- Improve names, remove duplication and simplify, with the tests still green and typecheck clean.
+- Improve names, remove duplication and simplify, with `npm run check` still green.
 - Commit only if something changed: `refactor(<scope>): …`.
 
 ## Rules

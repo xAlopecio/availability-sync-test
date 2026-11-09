@@ -23,9 +23,14 @@ Commands (run from `service/`):
 | Command | What it does |
 |---|---|
 | `npm start` / `npm run dev` | Run the service (`node src/main.ts`, native type stripping, no build). |
-| `npm run typecheck` | `tsc --noEmit`. Must pass before every commit. |
+| `npm run typecheck` | `tsc --noEmit`. |
+| `npm run lint` / `npm run lint:fix` | ESLint: basic recommended rules plus typescript-eslint, not type-aware. |
+| `npm run format` / `npm run format:check` | Prettier (single quotes, width 100, trailing commas). |
+| `npm run check` | typecheck + lint + format check + unit tests. **Must pass before every commit.** |
 | `npm test` | Unit tests (`src/**/*.test.ts`). Fast, no Docker needed. |
 | `npm run test:integration` | Integration tests (`test/integration/`) against real Portal Sol + Postgres. Slow: the portal allows 30 req/min. |
+
+TypeScript is pinned to **5.9.x**: typescript-eslint supports TS < 6.1, so do not upgrade to TS 7.
 
 ## Code conventions
 
@@ -44,6 +49,22 @@ Commands (run from `service/`):
 - Integration tests call `POST /__admin/reset` first and assert on `/__admin/requests` and on the portal's final state. Use the `verify-portal` skill for manual checks.
 - Never weaken or delete a test just to make it pass. If a test looks wrong, say so and explain why.
 - Portal 503s are random (~24 %), so integration tests must tolerate retries. Do not mock the portal in integration tests.
+
+## Pre-commit review
+
+Before committing code (`feat`, `fix` or `refactor`), run `npm run check` and then launch the **`review` agent** (`.claude/agents/review.md`). Pure `docs`/`chore` commits and the red step of TDD (`test(...)`) skip the review unless the user asks for one.
+
+The agent receives **exactly three inputs, and none of our reasoning**:
+1. `problem_statement`: the SPEC sections and ACs the change implements, quoted verbatim.
+2. `constraints_contract`: external constraints only, taken from `README.md` and `API.md` (Node + TS, PostgreSQL, no lost updates, portal limits, 31-day ranges, idempotent PUT). Never our own design decisions.
+3. `implementation_output`: `git diff --staged`.
+
+Mode: `fast` for local changes; `deep` when the change touches a SPEC decision (D1–D8), the data model or the worker's concurrency.
+
+- `STOP_AND_REPLAN` → do not commit. Report to the user.
+- `PROCEED` → show the user the risks found, and say which ones we address and which we accept, with the reason.
+
+The agent is required to find at least 3 risks, so not every risk is a real problem: the user decides. Record what the review caught (or got wrong) for `PROCESS.md`.
 
 ## Git workflow
 
