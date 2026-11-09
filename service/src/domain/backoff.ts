@@ -17,19 +17,28 @@ type TransientOutcome = Extract<Outcome, { class: 'transient' }>;
 
 /** Upper bound of the delay before retry number `attempt + 1` (`attempt` = attempts already made, ≥ 1). */
 export function backoffCeilingMs(
-  _attempt: number,
-  _policy: RetryPolicy = DEFAULT_RETRY_POLICY,
+  attempt: number,
+  policy: RetryPolicy = DEFAULT_RETRY_POLICY,
 ): number {
-  throw new Error('not implemented');
+  // Clamp the exponent: 2 ** 1023 is still finite but 2 ** 1024 is Infinity.
+  const exponent = Math.min(Math.max(attempt - 1, 0), 52);
+  return Math.min(policy.maxMs, policy.baseMs * 2 ** exponent);
 }
 
 /** When to try again after a transient failure. `random()` must return a value in [0, 1). */
-export function nextAttemptAt(_args: {
+export function nextAttemptAt(args: {
   attempt: number;
   outcome: TransientOutcome;
   now: number;
   random: () => number;
   policy?: RetryPolicy;
 }): number {
-  throw new Error('not implemented');
+  const { attempt, outcome, now, random, policy = DEFAULT_RETRY_POLICY } = args;
+  if (outcome.label === 'rate_limited' && outcome.retryAfterMs !== undefined) {
+    // The portal told us when; jitter could only make us early. The global pause in the rate
+    // limiter keeps other tasks from piling in at the same instant.
+    return now + outcome.retryAfterMs + policy.rateLimitMarginMs;
+  }
+  // Full jitter (delay uniform in [0, ceiling)): spreads retries of tasks that failed together.
+  return now + Math.floor(random() * backoffCeilingMs(attempt, policy));
 }
