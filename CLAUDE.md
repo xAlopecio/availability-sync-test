@@ -27,7 +27,7 @@ Commands (run from `service/`):
 | `npm run lint` / `npm run lint:fix` | ESLint: basic recommended rules plus typescript-eslint, not type-aware. |
 | `npm run format` / `npm run format:check` | Prettier (single quotes, width 100, trailing commas). |
 | `npm run check` | typecheck + lint + format check + unit tests. **Must pass before every commit.** |
-| `npm test` | Unit tests (`src/**/*.test.ts`). Fast, no Docker needed. |
+| `npm test` | Unit tests (`test/unit/`). Fast, no Docker needed. |
 | `npm run test:integration` | Integration tests (`test/integration/`) against real Portal Sol + Postgres. Slow: the portal rate-limits requests (30 req/min in the `base` variant). |
 
 TypeScript is pinned to **5.9.x**: typescript-eslint supports TS < 6.1, so do not upgrade to TS 7.
@@ -36,7 +36,10 @@ TypeScript is pinned to **5.9.x**: typescript-eslint supports TS < 6.1, so do no
 
 - TypeScript strict, ESM. **Erasable syntax only** (Node runs `.ts` directly): no `enum`, no `namespace`, no constructor parameter properties. Use union types and `as const` objects instead.
 - Relative imports use the `.ts` extension (`import { x } from './x.ts'`); type-only imports use `import type`.
-- Layout (see SPEC §3): `domain/` holds pure logic with no I/O; `portal/` holds the client and rate limiter; `db/` holds the migrations and `repository.ts`; `worker/`, `http/`, `metrics/`.
+- Layout (SPEC §3): production code in `src/`, **all tests in `test/`**, never next to the code.
+  - `src/domain/{calendar,updates,retry}/` hold pure logic with no I/O; `src/portal/` holds the client and rate limiter; `src/db/` holds the migrations and `repository.ts`; `src/http/`, `src/worker/`, `src/metrics/`.
+  - `test/unit/` mirrors `src/` (the test for `src/x/y.ts` is `test/unit/x/y.test.ts`); `test/integration/` and `test/e2e/` hold tests that need services; `test/support/` holds shared helpers.
+  - Tests import production code as `#src/...` (a Node subpath import), never with `../../src`.
 - **No ORM.** All SQL lives in `db/repository.ts` (SPEC D8). Migrations are numbered `.sql` files in `db/migrations/`.
 - Inject time (`now()`) and randomness (jitter) into domain logic so tests are deterministic.
 - Configuration only through env vars (SPEC §8), parsed in a single `config.ts`.

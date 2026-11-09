@@ -40,6 +40,17 @@ Through environment variables. Defaults suit the local `docker compose` setup.
 
 The full list (rate limit, timeouts, worker concurrency, retries) is in SPEC §8.
 
+## Project layout
+
+```
+src/          production code: domain/ (pure logic), portal/, db/, http/, worker/, metrics/
+test/unit/    unit tests, mirroring src/
+test/integration/   tests against real PostgreSQL (and Portal Sol)
+test/support/ shared test helpers
+```
+
+Tests import production code as `#src/...` (Node subpath import, see `package.json`). The full layout is described in SPEC §3.
+
 ## Tests and checks
 
 ```bash

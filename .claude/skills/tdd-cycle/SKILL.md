@@ -1,6 +1,6 @@
 ---
 name: tdd-cycle
-description: Red-green-refactor loop for this repo. Use when implementing any logic in service/src/domain/ or the rate limiter, or whenever the user asks to "hacer TDD" or to implement an acceptance criterion from SPEC.md test-first.
+description: Red-green-refactor loop for this repo. Use when implementing any logic in service/src/domain/, the rate limiter or any other unit-testable module, or whenever the user asks to "hacer TDD" or to implement an acceptance criterion from SPEC.md test-first.
 ---
 
 # TDD cycle
@@ -12,7 +12,7 @@ Work on a `feature/*` branch, never on `develop` or `master`. Run every command 
 - List the scenarios **before writing code**: happy path, boundaries (month/year change, 1-day and 31/32-day ranges, 0 price…) and every error case. Show the list to the user and wait for their approval before going on: this is where design mistakes are cheapest to catch.
 
 ## 2. Red
-- Write the tests in `src/<module>/<file>.test.ts`. Name them with the AC they cover, e.g. `it('AC3: splits 32 days into 31 + 1', …)`.
+- Write the tests in `test/unit/<same path as in src>/<file>.test.ts` (or `test/integration/…` when they need Postgres or the portal), importing the code as `#src/...`. Name them with the AC they cover, e.g. `it('AC3: splits 32 days into 31 + 1', …)`.
 - Run `npm test`. They **must fail, and for the right reason** (missing function or wrong result, not a syntax or import error). If a test passes before any implementation exists, it is testing nothing: fix the test.
 - Commit: `test(<scope>): <behaviour> (red)`.
 

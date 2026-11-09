@@ -45,7 +45,7 @@ Legend: 🤖 delegated to the AI · 👤 decided or done by the author · ⚠️
 
 ## Phase 3 — Core domain logic with TDD (`feature/core`)
 
-- 👤 Insisted that the scenarios be defined **before** any test. 🤖 Wrote `docs/TEST-SCENARIOS.md` (~60 scenarios, 7 modules, 6 open questions). 👤 Approved them all (`add901b`).
+- 👤 Insisted that the scenarios be defined **before** any test. 🤖 Wrote the core test scenarios (now `docs/scenarios/core.md`; ~60 scenarios, 7 modules, 6 open questions). 👤 Approved them all (`add901b`).
 - 🔍 Writing the scenarios exposed a spec gap: SPEC only required a "non-empty" `accommodationId`, but the id goes into the portal URL path, so `../x` or `a/b` would change the request. The pattern `^[A-Za-z0-9_-]{1,64}$` and the other approved decisions went into **SPEC v2** (`de907c1`).
 - 🤖 Implemented the 7 modules red → green, with one commit per step. Every red step was checked to fail **with "not implemented"**, not with an import or syntax error.
 - ⚠️🔍 **C10 passed against the stub.** It only asserted that *something* was thrown, and the stub throws. It was tightened to the specific `RangeError` before committing the red step (`68bf4fb`).
@@ -69,4 +69,4 @@ Legend: 🤖 delegated to the AI · 👤 decided or done by the author · ⚠️
 - 👤 Asked for the deliberate-defect check (mutation testing) to be extended from the rate limiter to `outcome` and `validation`. 🤖 Wrote a throwaway script with 41 hand-written mutants.
   - First run: **11 survived**. Real gaps: the 2xx/5xx upper bounds, an empty `Retry-After` (it would have retried immediately instead of waiting 60 s), the letter guard before `Date.parse`, the `to` = `from` − 1 boundary, and the order of date errors.
   - ⚠️🔍 One of the new tests was itself wrong: `"2030"` was meant to reach the date path, but it is read as delay-seconds first. It **failed against the correct code**, which exposed the mistaken assumption, and it was replaced by `"2030-01-01"`.
-  - Final: outcome 19/19 killed, validation 20/22. The 2 survivors are proven equivalent mutants (redundant guards), documented in `TEST-SCENARIOS.md` §9.
+  - Final: outcome 19/19 killed, validation 20/22. The 2 survivors are proven equivalent mutants (redundant guards), documented in `docs/scenarios/core.md` §9.
