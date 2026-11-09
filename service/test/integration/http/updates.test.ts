@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { buildApp } from '#src/http/app.ts';
 import { createPool } from '#src/db/pool.ts';
+import { ACCOMMODATION_LOCK_SQL } from '#src/db/repository.ts';
+import { databaseUrl } from '../../support/test-db.ts';
 import { errorCodeOf, useApp } from '../../support/app.ts';
 import { useMigratedDatabase } from '../../support/migrated-db.ts';
 
@@ -126,5 +128,34 @@ describe('POST /updates', () => {
     const res = await app().inject({ method: method as 'GET' | 'DELETE', url });
     expect(res.statusCode).toBe(404);
     expect(errorCodeOf(res.json())).toBe('NOT_FOUND');
+  });
+
+  it('H10: a lock held longer than lock_timeout answers 503; other accommodations are unaffected', async () => {
+    const busyPool = createPool(databaseUrl(), { max: 4, lockTimeoutMs: 300 });
+    const busyApp = buildApp({ pool: busyPool, maxUpdateRangeDays: 366, logger: false });
+    const holder = await db.pool().connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query(ACCOMMODATION_LOCK_SQL, ['acc-1003']);
+      const send = (accommodationId: string) =>
+        busyApp.inject({
+          method: 'POST',
+          url: '/updates',
+          headers: { 'content-type': 'application/json' },
+          payload: JSON.stringify({ ...readme, accommodationId }),
+        });
+      const started = Date.now();
+      const blocked = await send('acc-1003');
+      expect(blocked.statusCode).toBe(503);
+      expect(blocked.headers['retry-after']).toBe('5');
+      expect(Date.now() - started).toBeLessThan(3_000);
+      expect((await send('acc-1001')).statusCode).toBe(202);
+      expect(await rowCounts()).toEqual({ updates: 1, tasks: 1 }); // only acc-1001's
+    } finally {
+      await holder.query('ROLLBACK');
+      holder.release();
+      await busyApp.close();
+      await busyPool.end();
+    }
   });
 });

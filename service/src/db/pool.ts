@@ -19,7 +19,14 @@ const PARSERS: Partial<Record<number, (value: string) => unknown>> = {
  */
 export function createPool(
   connectionString: string,
-  options: { max?: number; connectionTimeoutMs?: number } = {},
+  options: {
+    max?: number;
+    connectionTimeoutMs?: number;
+    statementTimeoutMs?: number;
+    lockTimeoutMs?: number;
+    /** Called when an idle pooled connection fails (e.g. the server terminated it). */
+    onError?: (error: Error) => void;
+  } = {},
 ): pg.Pool {
   return new pg.Pool({
     connectionString,

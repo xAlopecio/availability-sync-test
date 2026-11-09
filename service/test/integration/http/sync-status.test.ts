@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { createPool } from '#src/db/pool.ts';
 import { acceptUpdate } from '#src/db/repository.ts';
+import { buildApp } from '#src/http/app.ts';
 import { errorCodeOf, useApp } from '../../support/app.ts';
 import { anUpdate, chunksOf, day } from '../../support/fixtures.ts';
 import { useMigratedDatabase } from '../../support/migrated-db.ts';
@@ -185,5 +187,22 @@ describe('GET /accommodations/:id/sync-status', () => {
     const { body } = await status('acc-1003');
     expect(body.pendingUpdates).toBe(1);
     expect(body.recentUpdates.map((u: { updateId: number }) => u.updateId)).toEqual([mine]);
+  });
+
+  it('G10: with the database unavailable it answers 503 without talking about storing updates', async () => {
+    const deadPool = createPool('postgres://sync:sync@127.0.0.1:1/nowhere', { max: 1 });
+    const deadApp = buildApp({ pool: deadPool, maxUpdateRangeDays: 366, logger: false });
+    try {
+      const res = await deadApp.inject({
+        method: 'GET',
+        url: '/accommodations/acc-1003/sync-status',
+      });
+      expect(res.statusCode).toBe(503);
+      expect(errorCodeOf(res.json())).toBe('UNAVAILABLE');
+      expect(res.json().error.message).not.toMatch(/stor/i);
+    } finally {
+      await deadApp.close();
+      await deadPool.end();
+    }
   });
 });

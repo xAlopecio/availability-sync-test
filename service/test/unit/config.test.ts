@@ -17,6 +17,7 @@ describe('loadConfig', () => {
       port: 3000,
       databaseUrl: 'postgres://sync:sync@localhost:5432/sync',
       databaseStartupTimeoutMs: 30000,
+      shutdownGraceMs: 10000,
       logLevel: 'info',
       maxUpdateRangeDays: 366,
       portal: {
@@ -36,6 +37,7 @@ describe('loadConfig', () => {
         PORT: '8080',
         DATABASE_URL: 'postgres://u:p@db:5432/other',
         DATABASE_STARTUP_TIMEOUT_MS: '1500',
+        SHUTDOWN_GRACE_MS: '2000',
         LOG_LEVEL: 'debug',
         MAX_UPDATE_RANGE_DAYS: '90',
         PORTAL_BASE_URL: 'https://portal.example.com',
@@ -52,6 +54,7 @@ describe('loadConfig', () => {
       port: 8080,
       databaseUrl: 'postgres://u:p@db:5432/other',
       databaseStartupTimeoutMs: 1500,
+      shutdownGraceMs: 2000,
       logLevel: 'debug',
       maxUpdateRangeDays: 90,
       portal: {
@@ -78,6 +81,7 @@ describe('loadConfig', () => {
     ['MAX_UPDATE_RANGE_DAYS', '0'],
     ['PORTAL_API_KEY', ''],
     ['DATABASE_STARTUP_TIMEOUT_MS', '0'],
+    ['SHUTDOWN_GRACE_MS', '0'],
   ])('K3: rejects %s=%j, naming the variable', (name, value) => {
     const problems = problemsOf({ [name]: value });
     expect(problems).toHaveLength(1);

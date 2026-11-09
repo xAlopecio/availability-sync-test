@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { createPool } from '#src/db/pool.ts';
+import { databaseUrl } from '../../support/test-db.ts';
 import { ACCOMMODATION_LOCK_SQL, acceptUpdate } from '#src/db/repository.ts';
 import { anUpdate, chunksOf, day } from '../../support/fixtures.ts';
 import { useMigratedDatabase } from '../../support/migrated-db.ts';
@@ -117,5 +119,23 @@ describe('acceptUpdate', () => {
     await acceptUpdate(db.pool(), request, chunksOf(request));
     const { rows } = await db.pool().query('SELECT date_from, date_to FROM sync_tasks');
     expect(rows[0]).toEqual({ date_from: '2026-10-25', date_to: '2026-10-25' });
+  });
+});
+
+describe('createPool', () => {
+  it('P7: every connection has statement_timeout 10s and lock_timeout 5s', async () => {
+    const pool = createPool(databaseUrl(), { max: 1 });
+    try {
+      const client = await pool.connect();
+      try {
+        const statement = (await client.query('SHOW statement_timeout')).rows[0].statement_timeout;
+        const lock = (await client.query('SHOW lock_timeout')).rows[0].lock_timeout;
+        expect({ statement, lock }).toEqual({ statement: '10s', lock: '5s' });
+      } finally {
+        client.release();
+      }
+    } finally {
+      await pool.end();
+    }
   });
 });
