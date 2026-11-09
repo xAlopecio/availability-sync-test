@@ -5,10 +5,26 @@ export type RateLimiterOptions = {
   readonly limit: number;
   readonly windowMs: number;
   readonly now?: () => number;
-  readonly sleep?: (ms: number) => Promise<void>;
+  readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 };
 
-const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const abortError = () =>
+  new DOMException('The wait for a rate-limit permit was aborted', 'AbortError');
+
+/** setTimeout-based sleep that ends early, rejecting, when `signal` aborts. */
+const defaultSleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(abortError());
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 
 /** setTimeout overflows above 2^31 − 1 ms into a 1 ms busy loop; long waits are slept in steps. */
 const MAX_SLEEP_MS = 60_000;
@@ -21,7 +37,7 @@ export class SlidingWindowRateLimiter {
   readonly #limit: number;
   readonly #windowMs: number;
   readonly #now: () => number;
-  readonly #sleep: (ms: number) => Promise<void>;
+  readonly #sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** Start times still inside the window, oldest first. */
   #starts: number[] = [];
   #pausedUntil = 0;
@@ -66,15 +82,17 @@ export class SlidingWindowRateLimiter {
 
   /** Gives back the most recent permit (a claim found nothing to send, SPEC D5). */
   release(): void {
-    throw new Error('not implemented');
+    this.#starts.pop();
   }
 
   /** Waits until a permit is free and takes it; rejects with an AbortError if `signal` aborts. */
-  async acquire(_options: { signal?: AbortSignal } = {}): Promise<void> {
+  async acquire(options: { signal?: AbortSignal } = {}): Promise<void> {
+    const { signal } = options;
     for (;;) {
+      if (signal?.aborted) throw abortError();
       const result = this.tryAcquire(this.#now());
       if (result.ok) return;
-      await this.#sleep(Math.min(result.waitMs, MAX_SLEEP_MS));
+      await this.#sleep(Math.min(result.waitMs, MAX_SLEEP_MS), signal);
     }
   }
 }
