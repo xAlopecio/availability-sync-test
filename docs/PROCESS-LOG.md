@@ -42,3 +42,27 @@ Legend: 🤖 delegated to the AI · 👤 decided or done by the author · ⚠️
   - ⚠️ **Reviewer overstated:** a substring filter in `portal.mjs` was flagged MEDIUM, but the real ids (`acc-1001…acc-1010`) cannot collide. It was fixed anyway because the fix is one line (`cf3bb88`).
   - Accepted: `pino` not declared (Fastify's logger is used); workstation paths in `CLAUDE.md`.
 - 🔍 The first CI run warned that `actions/*@v4` target the deprecated Node 20. Bumped to v7 (`b1e5b45`).
+
+## Phase 3 — Core domain logic with TDD (`feature/core`)
+
+- 👤 Insisted that the scenarios be defined **before** any test. 🤖 Wrote `docs/TEST-SCENARIOS.md` (~60 scenarios, 7 modules, 6 open questions). 👤 Approved them all (`add901b`).
+- 🔍 Writing the scenarios exposed a spec gap: SPEC only required a "non-empty" `accommodationId`, but the id goes into the portal URL path, so `../x` or `a/b` would change the request. The pattern `^[A-Za-z0-9_-]{1,64}$` and the other approved decisions went into **SPEC v2** (`de907c1`).
+- 🤖 Implemented the 7 modules red → green, with one commit per step. Every red step was checked to fail **with "not implemented"**, not with an import or syntax error.
+- ⚠️🔍 **C10 passed against the stub.** It only asserted that *something* was thrown, and the stub throws. It was tightened to the specific `RangeError` before committing the red step (`68bf4fb`).
+- ⚠️🔍 **A scenario was missing (C11).** While implementing `splitRange`, `maxDays = 0` turned out to loop forever: the new test hung until a 20 s alarm killed it. The guard and scenario C11 were added, marked "added during implementation" (`a7f3890`). The same lesson led to R9 (invalid rate-limiter configuration).
+- ⚠️🔍 **A code comment claimed more than was true.** It said that `Date.parse` accepts `"-5"` and `"17.5"`. Checked in Node: `"-5"` becomes a date in 2001, `"17.5"` is `NaN`. The comment was corrected before commit (`9a25a23`).
+- 🔍 Validation beyond the tests:
+  - Date arithmetic cross-checked against `Date` over 1900–2199 (109,573 consecutive days).
+  - The rate limiter **mutation-tested**: an off-by-one on the limit and a shifted window boundary were introduced on purpose, and both were caught, including by the 10-minute invariant R3 (`55519ed`).
+- 🤖 Design choices made inside the block:
+  - Integer days-from-civil arithmetic instead of `Date`, which avoids `Date.UTC` mapping years 0–99 to 19xx.
+  - Unit tests run in `Europe/Madrid`, so that DST bugs show up.
+  - The 2-decimal price check uses a `toFixed(2)` round trip rather than an epsilon, which breaks near the 1,000,000 cap.
+- 🔍 **Review of the block (`deep`): `PROCEED`.** Root risk: the shared rate limiter accepted any time input. The reviewer showed that a huge `Retry-After` froze every send, and that above 2³¹ ms `setTimeout` overflows into a 1 ms busy loop. Outcome:
+  - Fixed (`4431f65`): `Retry-After` capped at 10 min; long waits slept in steps of ≤ 60 s; a monotonic clock plus `pauseFor(ms)`; the `maxRangeDays` guard (`NaN` disabled the range check).
+  - 👤 **Decided by the author, SPEC v3** (`d692fb4`): only `400`/`404` are permanent. Any undocumented status is retried as `unexpected_status`, with an alert. Before, a 408 or 409 would have **dropped an accepted update**, which our own spec had allowed against the "no update lost" requirement.
+  - 👤 Accepted and documented: `sync-status` can read `synced` while an older non-overlapping update failed. With only `400`/`404` permanent this needs a bug to happen.
+  - Deferred: "phantom" permits (D5 takes a permit *before* claiming a task) → `feature/worker`. Cancellable `acquire()` → worker. Portal error code on permanent failures → worker. Limiter state in metrics → `feature/metrics`.
+  - ⚠️ **Partly right, accepted:** "oversized for the budget". The hand-rolled calendar arithmetic could have been `Date.UTC` day numbers, and the HTTP-date `Retry-After` branch goes beyond the portal contract. Both were already done and verified, and redoing them would cost more than it saves. Recorded honestly here.
+  - ⚠️ **Reviewer wrong, by design of its isolation:** it called the 25/min default "a guess", but it comes from our probe (30/min measured). The reviewer does not see the probe.
+- ⚠️🔍 **A silent no-op edit by the AI:** one scripted text replacement did not match (Prettier had reflowed the line) and the script did not assert the match, so `unexpected_status` never reached the type. The tests still passed, because Vitest strips types without checking them. **`tsc` in `npm run check` caught it.** That is the case for running typecheck in the gate, not just the tests.
