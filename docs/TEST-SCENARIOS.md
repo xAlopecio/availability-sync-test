@@ -137,3 +137,17 @@ A sliding window of `limit` request starts per `windowMs` (default 25 per 60 s),
 | Q4 | Delay when a 429 has no valid `Retry-After`? | **60 s**, the portal's window: the safe worst case. |
 | Q5 | Safety margin added to `Retry-After`? | **+500 ms.** `Retry-After` comes in whole seconds; the probe saw it count down to `1` and only be accepted at about +2 s, so arriving just at the limit risks a second 429. |
 | Q6 | `404` as permanent? | **Yes** (SPEC D4). An accommodation that does not exist will not exist on retry. |
+
+---
+
+## 9. Mutation testing (after implementation)
+
+Hand-written mutants (one change at a time, the module's tests run, the source restored) to check that the tests detect real defects, not just that they pass.
+
+| Module | Mutants | Killed first run | Gaps found → cases added | Final |
+|---|---|---|---|---|
+| `portal/rate-limiter.ts` | 2 | 2 | — | 2/2 killed |
+| `domain/outcome.ts` | 19 | 13 | `299` success / `300` unexpected (2xx upper bound); `599` server_error, `600`/`199` unexpected; empty `Retry-After`; `2030-01-01` (no letters, so not an HTTP date); an HTTP date equal to now; `" 17 "` with whitespace | **19/19 killed** |
+| `domain/update-validation.ts` | 22 | 16 | the error message for non-object bodies; `to` = `from` − 1 boundary; `from` named first when both dates are invalid | **20/22 killed**, 2 equivalent |
+
+**Equivalent mutants (cannot be killed, by construction):** removing `typeof value !== 'number'` or `!Number.isFinite(value)` from the price check. Each is redundant with the other checks: `Number.isFinite('120')` is `false` (no coercion), `NaN` fails the `toFixed(2)` round trip, and `Infinity` fails the maximum. Both stay because they make the intent explicit, and `typeof` narrows the TypeScript type.

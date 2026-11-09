@@ -31,9 +31,12 @@ describe('validateUpdateRequest', () => {
     expectOk(valid);
   });
 
-  it.each([null, [], 'body', 42])('V2 / AC2: rejects a body that is not an object (%j)', (body) => {
-    expectError(body, 'INVALID_BODY');
-  });
+  it.each([null, [], ['x'], 'body', 42])(
+    'V2 / AC2: rejects a body that is not an object (%j)',
+    (body) => {
+      expectError(body, 'INVALID_BODY', 'JSON object');
+    },
+  );
 
   it.each(Object.keys(valid) as (keyof typeof valid)[])(
     'V3 / AC2: rejects a missing %s, naming it',
@@ -69,6 +72,11 @@ describe('validateUpdateRequest', () => {
 
   it('V7 / AC2: rejects to earlier than from', () => {
     expectError({ ...valid, from: '2026-10-07', to: '2026-10-01' }, 'INVALID_DATE', 'to');
+  });
+
+  it('V7 / AC2: boundary — to one day before from is rejected, to equal to from is accepted', () => {
+    expectError({ ...valid, from: '2026-10-07', to: '2026-10-06' }, 'INVALID_DATE', 'to');
+    expectOk({ ...valid, from: '2026-10-07', to: '2026-10-07' });
   });
 
   it('V8 / AC2: accepts 366 days and rejects 367 (default limit)', () => {
@@ -117,6 +125,10 @@ describe('validateUpdateRequest', () => {
 
   it('V13: accepts dates in the past', () => {
     expectOk({ ...valid, from: '2020-01-01', to: '2020-01-31' });
+  });
+
+  it('names from (not to) when both dates are invalid', () => {
+    expectError({ ...valid, from: 'bad', to: 'also-bad' }, 'INVALID_DATE', '"from"');
   });
 
   it('returns the first error in field order when several fields are wrong', () => {

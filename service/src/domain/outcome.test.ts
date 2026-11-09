@@ -14,7 +14,7 @@ const response = (status: number, retryAfter?: string | null): PortalCallResult 
 const classify = (result: PortalCallResult) => classifyOutcome(result, NOW);
 
 describe('classifyOutcome', () => {
-  it.each([200, 204])('O1 / AC10: %i is success', (status) => {
+  it.each([200, 204, 299])('O1 / AC10: %i is success', (status) => {
     expect(classify(response(status))).toEqual({ class: 'success', label: 'success' });
   });
 
@@ -38,16 +38,25 @@ describe('classifyOutcome', () => {
   it.each([
     ['missing', undefined],
     ['null', null],
+    ['empty', ''],
     ['garbage', 'soon'],
     ['negative', '-5'],
+    // No letters, so not an HTTP date; without the letter guard Date.parse would read it as a
+    // future date and wait 10 minutes. (A bare '2030' is delay-seconds, not this case.)
+    ['ISO date', '2030-01-01'],
     ['decimal', '17.5'],
     ['a past HTTP date', new Date(NOW - 10_000).toUTCString()],
+    ['an HTTP date equal to now', new Date(NOW).toUTCString()],
   ])('O4 / AC10: 429 with a %s Retry-After falls back to the full window', (_, retryAfter) => {
     expect(classify(response(429, retryAfter as string | null | undefined))).toEqual({
       class: 'transient',
       label: 'rate_limited',
       retryAfterMs: RATE_LIMIT_FALLBACK_MS,
     });
+  });
+
+  it('O2: surrounding whitespace in Retry-After is ignored', () => {
+    expect(classify(response(429, ' 17 '))).toMatchObject({ retryAfterMs: 17_000 });
   });
 
   it('O5: 429 with Retry-After 0 means retry now', () => {
@@ -58,7 +67,7 @@ describe('classifyOutcome', () => {
     expect(classify(response(503))).toEqual({ class: 'transient', label: 'unavailable' });
   });
 
-  it.each([500, 502, 504])('O7 / AC10: %i is transient server_error', (status) => {
+  it.each([500, 502, 504, 599])('O7 / AC10: %i is transient server_error', (status) => {
     expect(classify(response(status))).toEqual({ class: 'transient', label: 'server_error' });
   });
 
@@ -90,7 +99,7 @@ describe('classifyOutcome', () => {
     },
   );
 
-  it.each([408, 409, 413, 422, 302, 304, 100])(
+  it.each([408, 409, 413, 422, 300, 302, 304, 100, 199, 600])(
     'O12 / AC10: an undocumented %i is transient unexpected_status (never drop an accepted update)',
     (status) => {
       expect(classify(response(status))).toEqual({
