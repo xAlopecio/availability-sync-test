@@ -23,6 +23,16 @@ export default defineConfig({
           fileParallelism: false,
         },
       },
+      {
+        test: {
+          name: 'e2e',
+          include: ['test/e2e/**/*.test.ts'],
+          // The whole service against the real portal: the slowest suite.
+          testTimeout: 600_000,
+          hookTimeout: 120_000,
+          fileParallelism: false,
+        },
+      },
     ],
   },
 });

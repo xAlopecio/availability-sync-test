@@ -21,5 +21,30 @@ export default tseslint.config(
       'no-console': 'error', // use the Fastify (pino) logger
     },
   },
+  {
+    // Tests reach production code only through the #src subpath import (SPEC §3).
+    files: ['test/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            { group: ['**/src/**'], message: 'Import production code as #src/... in tests.' },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // Production code uses relative imports; #src is for tests only. (A regex, because the
+    // gitignore-style `group` syntax treats a leading # as a comment and ignores the pattern.)
+    files: ['src/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        { patterns: [{ regex: '^#src/', message: 'Use relative imports inside src/.' }] },
+      ],
+    },
+  },
   prettier,
 );
