@@ -21,6 +21,9 @@ export type Outcome =
 /** Used when a 429 carries no usable Retry-After: the portal's full window (SPEC D4). */
 export const RATE_LIMIT_FALLBACK_MS = 60_000;
 
+/** Upper bound for any Retry-After: one bogus header must not freeze every send (SPEC D4). */
+export const RATE_LIMIT_MAX_MS = 600_000;
+
 export function classifyOutcome(result: PortalCallResult, now: number): Outcome {
   if (result.kind === 'timeout') return { class: 'transient', label: 'timeout' };
   if (result.kind === 'network_error') return { class: 'transient', label: 'network_error' };

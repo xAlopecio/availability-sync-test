@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { classifyOutcome, RATE_LIMIT_FALLBACK_MS, type PortalCallResult } from './outcome.ts';
+import {
+  classifyOutcome,
+  RATE_LIMIT_FALLBACK_MS,
+  RATE_LIMIT_MAX_MS,
+  type PortalCallResult,
+} from './outcome.ts';
 
 const NOW = Date.parse('2026-11-09T10:00:00.000Z');
 const response = (status: number, retryAfter?: string | null): PortalCallResult =>
@@ -74,18 +79,35 @@ describe('classifyOutcome', () => {
     expect(classify(response(401))).toEqual({ class: 'transient', label: 'unauthorized' });
   });
 
-  it.each([400, 404, 409, 422])('O11 / AC10: %i is permanent client_error', (status) => {
-    expect(classify(response(status))).toEqual({
-      class: 'permanent',
-      label: 'client_error',
-      status,
-    });
-  });
-
-  it.each([302, 304, 100])(
-    'O12: an unexpected %i is transient (never drop an update on something unknown)',
+  it.each([400, 404])(
+    'O11 / AC10: %i (documented data error) is permanent client_error',
     (status) => {
-      expect(classify(response(status))).toEqual({ class: 'transient', label: 'server_error' });
+      expect(classify(response(status))).toEqual({
+        class: 'permanent',
+        label: 'client_error',
+        status,
+      });
     },
   );
+
+  it.each([408, 409, 413, 422, 302, 304, 100])(
+    'O12 / AC10: an undocumented %i is transient unexpected_status (never drop an accepted update)',
+    (status) => {
+      expect(classify(response(status))).toEqual({
+        class: 'transient',
+        label: 'unexpected_status',
+      });
+    },
+  );
+
+  it.each([
+    ['huge delay-seconds', '99999999999'],
+    ['an HTTP date a month away', new Date(NOW + 30 * 24 * 3600 * 1000).toUTCString()],
+  ])('O13: 429 with %s is capped at 10 minutes', (_, retryAfter) => {
+    expect(classify(response(429, retryAfter))).toMatchObject({
+      label: 'rate_limited',
+      retryAfterMs: RATE_LIMIT_MAX_MS,
+    });
+    expect(RATE_LIMIT_MAX_MS).toBe(600_000);
+  });
 });

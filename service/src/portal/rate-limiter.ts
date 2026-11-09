@@ -55,6 +55,11 @@ export class SlidingWindowRateLimiter {
     this.#pausedUntil = Math.max(this.#pausedUntil, until);
   }
 
+  /** Pauses for `ms` from now, on the limiter's own clock. */
+  pauseFor(_ms: number): void {
+    throw new Error('not implemented');
+  }
+
   /** Waits until a permit is free and takes it. */
   async acquire(): Promise<void> {
     for (;;) {

@@ -143,4 +143,33 @@ describe('SlidingWindowRateLimiter.acquire', () => {
     expect(resolved).toBe(true);
     await call;
   });
+
+  it('R10: a long pause is waited in sleeps of at most 60 s (no setTimeout overflow)', async () => {
+    let clock = 0;
+    const sleeps: number[] = [];
+    const rl = new SlidingWindowRateLimiter({
+      limit: 5,
+      windowMs: 1_000,
+      now: () => clock,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        clock += ms;
+      },
+    });
+    rl.pauseUntil(2 * 3600 * 1000);
+    await rl.acquire();
+    expect(clock).toBe(2 * 3600 * 1000);
+    expect(sleeps.length).toBeGreaterThan(1);
+    expect(Math.max(...sleeps)).toBeLessThanOrEqual(60_000);
+  });
+});
+
+describe('SlidingWindowRateLimiter.pauseFor', () => {
+  it("R11: pauses relative to the limiter's own clock", () => {
+    const clock = 1_000;
+    const rl = new SlidingWindowRateLimiter({ limit: 5, windowMs: 1_000, now: () => clock });
+    rl.pauseFor(5_000);
+    expect(rl.tryAcquire(5_999)).toEqual({ ok: false, waitMs: 1 });
+    expect(rl.tryAcquire(6_000)).toEqual({ ok: true });
+  });
 });

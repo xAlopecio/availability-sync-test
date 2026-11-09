@@ -111,6 +111,10 @@ describe('validateUpdateRequest', () => {
     },
   );
 
+  it.each([Number.NaN, 0, -1, 1.5])('V14: rejects a maxRangeDays option of %s', (maxRangeDays) => {
+    expect(() => validateUpdateRequest(valid, { maxRangeDays })).toThrow(RangeError);
+  });
+
   it('V13: accepts dates in the past', () => {
     expectOk({ ...valid, from: '2020-01-01', to: '2020-01-31' });
   });
