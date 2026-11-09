@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { DateRange } from '../domain/calendar/chunking.ts';
+import type { TaskStatus } from '../domain/updates/sync-status.ts';
 import type { UpdateRequest } from '../domain/updates/update-validation.ts';
 
 /**
@@ -43,4 +44,33 @@ export async function acceptUpdate(
   } finally {
     client.release();
   }
+}
+
+/** One accepted update with its tasks aggregated, for `sync-status` (SPEC §6). */
+export type UpdateSummary = {
+  readonly updateId: number;
+  readonly from: string;
+  readonly to: string;
+  readonly available: boolean;
+  readonly pricePerNight: number;
+  readonly acceptedAt: Date;
+  /** Task statuses in chunk order (never empty). */
+  readonly taskStatuses: readonly [TaskStatus, ...TaskStatus[]];
+  readonly chunksDone: number;
+  /** Sum of the tasks' attempts. */
+  readonly attempts: number;
+  /** Error of the most recent attempt (`last_attempt_at`), if any. */
+  readonly lastError: string | null;
+  /** Earliest `next_attempt_at` among pending tasks. */
+  readonly nextAttemptAt: Date | null;
+  /** Latest `completed_at` among the tasks. */
+  readonly lastCompletedAt: Date | null;
+};
+
+/** Every update of an accommodation, newest first. */
+export async function listUpdateSummaries(
+  _pool: pg.Pool,
+  _accommodationId: string,
+): Promise<UpdateSummary[]> {
+  throw new Error('not implemented');
 }
