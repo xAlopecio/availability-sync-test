@@ -52,7 +52,7 @@ TypeScript is pinned to **5.9.x**: typescript-eslint supports TS < 6.1, so do no
 - Each test names the acceptance criterion it covers (`AC3: …`) when it maps to one.
 - Integration tests call `POST /__admin/reset` first and assert on `/__admin/requests` and on the portal's final state. Use the `verify-portal` skill for manual checks.
 - Never weaken or delete a test just to make it pass. If a test looks wrong, say so and explain why.
-- Portal 503s are random (~24 %), so integration tests must tolerate retries. Do not mock the portal in integration tests.
+- Portal 503s are random (~24 %), so integration tests must tolerate retries. **Never test sync behaviour against a simulated portal.** The only exception: a local throwaway HTTP server for the portal client's transport faults (timeouts, resets, refused connections, non-JSON bodies), which the real portal cannot produce on demand (SPEC §12).
 
 ## PR review (one per block of work)
 
