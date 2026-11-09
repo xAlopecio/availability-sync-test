@@ -62,7 +62,7 @@ An update is stored together with its chunks (`sync_tasks`) in the same transact
 | Outcome | Class | Action |
 |---|---|---|
 | 2xx | success | Task `done`. |
-| 429 | transient | Reschedule at `Retry-After`; **pause all sends** until then. |
+| 429 | transient | Reschedule at `Retry-After` + 500 ms safety margin (60 s if the header is missing or invalid); **pause all sends** until then. |
 | 503, timeout, network error, 5xx | transient | Reschedule with exponential backoff and full jitter (base 1 s, cap 5 min). |
 | 401 | transient (config) | Retry with backoff. A wrong key is fixable without losing the queue; alert immediately. |
 | 400, 404, other 4xx | permanent | Task `failed`. The update's remaining chunks become `failed` too (they would fail the same way: dates are pre-validated). This unblocks the accommodation's queue. |
@@ -130,10 +130,10 @@ An update's status is **derived** from its tasks: `failed` if any task failed, `
 
 ### `POST /updates`
 Body as in the README. Validation:
-- `accommodationId`: non-empty string.
+- `accommodationId`: matches `^[A-Za-z0-9_-]{1,64}$`. The id goes into the portal's URL path, so `/`, `..` or spaces must never reach it.
 - `from` and `to`: real `YYYY-MM-DD` dates, with `to >= from` and a range of at most 366 days (configurable).
 - `available`: boolean.
-- `pricePerNight`: finite number, ≥ 0, with at most 2 decimals.
+- `pricePerNight`: finite number, from 0 to 1,000,000, with at most 2 decimals.
 - Unknown fields are rejected.
 
 | Response | When |
@@ -252,3 +252,4 @@ Per-day desired state with coalescing (replacing D1); shared rate limiter for mu
 
 ### Changelog
 - v1: initial spec.
+- v2: decisions taken while defining the core test scenarios (`docs/TEST-SCENARIOS.md`): `accommodationId` pattern (it goes into the portal URL path), maximum price of 1,000,000, and for a 429 a +500 ms margin after `Retry-After` with a 60 s fallback when the header is missing.

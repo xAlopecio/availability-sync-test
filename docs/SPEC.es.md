@@ -64,7 +64,7 @@ Un update se guarda junto con sus trozos (`sync_tasks`) en la misma transacción
 | Resultado | Clase | Acción |
 |---|---|---|
 | 2xx | éxito | Tarea `done`. |
-| 429 | transitorio | Reprogramar para `Retry-After`; **pausar todos los envíos** hasta entonces. |
+| 429 | transitorio | Reprogramar para `Retry-After` + 500 ms de margen (60 s si la cabecera falta o no es válida); **pausar todos los envíos** hasta entonces. |
 | 503, timeout, error de red, 5xx | transitorio | Reprogramar con backoff exponencial y jitter completo (base 1 s, máximo 5 min). |
 | 401 | transitorio (configuración) | Reintentar con backoff. Una key incorrecta se arregla sin perder la cola; alerta inmediata. |
 | 400, 404, otros 4xx | permanente | Tarea `failed`. Los trozos restantes del update pasan también a `failed` (fallarían igual: las fechas ya están validadas). Esto desbloquea la cola del alojamiento. |
@@ -132,10 +132,10 @@ El estado de un update se **deduce** de sus tareas: `failed` si alguna falló, `
 
 ### `POST /updates`
 Body como en el README. Validación:
-- `accommodationId`: string no vacío.
+- `accommodationId`: cumple `^[A-Za-z0-9_-]{1,64}$`. El id va dentro de la ruta de la URL del portal, así que `/`, `..` o espacios nunca deben llegar a ella.
 - `from` y `to`: fechas `YYYY-MM-DD` reales, con `to >= from` y un rango de 366 días como mucho (configurable).
 - `available`: booleano.
-- `pricePerNight`: número finito, ≥ 0, con 2 decimales como mucho.
+- `pricePerNight`: número finito, de 0 a 1.000.000, con 2 decimales como mucho.
 - Se rechazan los campos desconocidos.
 
 | Respuesta | Cuándo |
@@ -254,3 +254,4 @@ Estado deseado por día con fusión de updates (sustituyendo D1); limitador comp
 
 ### Historial de cambios
 - v1: spec inicial.
+- v2: decisiones tomadas al definir los escenarios de test del core (`docs/TEST-SCENARIOS.md`): patrón del `accommodationId` (va en la ruta de la URL del portal), precio máximo de 1.000.000 y, ante un 429, margen de +500 ms tras el `Retry-After` con 60 s por defecto si falta la cabecera.
