@@ -18,7 +18,7 @@ export default tseslint.config(
       ],
       '@typescript-eslint/consistent-type-imports': 'error',
       eqeqeq: ['error', 'always'],
-      'no-console': 'warn', // use the pino logger
+      'no-console': 'error', // use the Fastify (pino) logger
     },
   },
   prettier,

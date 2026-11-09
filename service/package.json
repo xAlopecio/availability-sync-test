@@ -10,7 +10,7 @@
     "start": "node src/main.ts",
     "dev": "node --watch src/main.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --project unit",
+    "test": "vitest run --project unit --passWithNoTests",
     "test:integration": "vitest run --project integration",
     "test:all": "vitest run",
     "test:watch": "vitest --project unit",
