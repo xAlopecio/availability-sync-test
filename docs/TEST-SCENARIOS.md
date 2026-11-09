@@ -60,6 +60,7 @@ Dates are calendar days (`YYYY-MM-DD`, no time or zone), as in `API.md`. Arithme
 | V11 | `pricePerNight` with more than 2 decimals (`120.555`, `1.005`) | `INVALID_BODY` |
 | V12 | `pricePerNight` above the maximum (see Q3), `NaN` or `Infinity` | `INVALID_BODY` |
 | V13 | Dates in the past | ok (see Q1) |
+| V14 | `maxRangeDays` option not a positive integer (`NaN`, `0`, `1.5`) — *added after the review: `NaN` silently disabled the check* | throws `RangeError` |
 
 ## 4. Portal outcome classification — `domain/outcome.ts` (AC10)
 
@@ -77,8 +78,9 @@ Dates are calendar days (`YYYY-MM-DD`, no time or zone), as in `API.md`. Arithme
 | O8 | Client-side timeout | transient `timeout` |
 | O9 | Network error (connection refused or reset, DNS) | transient `network_error` |
 | O10 | `401` | transient `unauthorized` |
-| O11 | `400`, `404`, `409`, `422` (any 4xx other than `401` and `429`) | permanent `client_error` |
-| O12 | Unexpected status outside 2xx/4xx/5xx (`302`, `304`) | transient `server_error`: never drop an update on something we don't understand |
+| O11 | `400`, `404` (the only documented data errors) — *changed in SPEC v3 after the review; was "any 4xx"* | permanent `client_error` |
+| O12 | Any undocumented status: other 4xx (`408`, `409`, `413`, `422`), `1xx`, `3xx` — *changed in SPEC v3* | transient `unexpected_status`: never drop an update on something we don't understand |
+| O13 | `429` + an absurd `Retry-After` (`99999999999`, or an HTTP date a month away) — *added after the review* | `retryAfterMs` capped at 10 min |
 
 ## 5. Retry scheduling — `domain/backoff.ts` (AC10)
 
@@ -108,6 +110,8 @@ A sliding window of `limit` request starts per `windowMs` (default 25 per 60 s),
 | R7 | `limit = 1` | works (edge case) |
 | R8 | Async `acquire()`: 3 concurrent callers, `limit = 2` (fake timers) | 2 resolve immediately; the third only once the window frees a permit; never more than `limit` |
 | R9 | Invalid configuration: `limit` not a positive integer, `windowMs` ≤ 0 — *added while writing the tests, after C11* | throws `RangeError` |
+| R10 | A long pause (2 h) in async `acquire()` — *added after the review: waits above 2³¹ ms overflow `setTimeout` into a 1 ms busy loop* | every individual sleep ≤ 60 s; resolves when the pause ends |
+| R11 | `pauseFor(ms)` is relative to the limiter's own clock, which is monotonic (`performance.now()`) — *added after the review: a wall clock stepping back would stall everything* | denied until `now + ms`, then allowed |
 
 ## 7. Sync status derivation — `domain/sync-status.ts` (supports AC12)
 

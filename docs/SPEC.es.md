@@ -64,10 +64,11 @@ Un update se guarda junto con sus trozos (`sync_tasks`) en la misma transacción
 | Resultado | Clase | Acción |
 |---|---|---|
 | 2xx | éxito | Tarea `done`. |
-| 429 | transitorio | Reprogramar para `Retry-After` + 500 ms de margen (60 s si la cabecera falta o no es válida); **pausar todos los envíos** hasta entonces. |
+| 429 | transitorio | Reprogramar para `Retry-After` + 500 ms de margen (60 s si la cabecera falta o no es válida; con un máximo de 10 min, porque una cabecera disparatada no debe congelar todos los envíos); **pausar todos los envíos** hasta entonces. |
 | 503, timeout, error de red, 5xx | transitorio | Reprogramar con backoff exponencial y jitter completo (base 1 s, máximo 5 min). |
+| Cualquier otro código (4xx no listados aquí, 1xx, 3xx) | transitorio (inesperado) | Reintentar con backoff, con la etiqueta `unexpected_status`, y alertar. El portal no lo documenta, así que descartar el update sería perderlo; si se repite, se ve en la antigüedad del pendiente más viejo. |
 | 401 | transitorio (configuración) | Reintentar con backoff. Una key incorrecta se arregla sin perder la cola; alerta inmediata. |
-| 400, 404, otros 4xx | permanente | Tarea `failed`. Los trozos restantes del update pasan también a `failed` (fallarían igual: las fechas ya están validadas). Esto desbloquea la cola del alojamiento. |
+| 400, 404 | permanente | Tarea `failed`. Los trozos restantes del update pasan también a `failed` (fallarían igual: las fechas ya están validadas). Esto desbloquea la cola del alojamiento. |
 
 Los fallos transitorios se reintentan **sin límite**: poner un tope significaría descartar updates ya aceptados. Una tarea que se reintenta indefinidamente se detecta con la métrica y la alerta de antigüedad del pendiente más viejo (§7).
 
@@ -163,6 +164,7 @@ Body como en el README. Validación:
 ```
 
 - `status`: `pending` si hay algún update pendiente; si no, `failed` si falló el update más reciente; si no, `synced`.
+  *Limitación conocida, aceptada:* un update antiguo fallido sobre días que no cubre un update posterior sincronizado se mostraría como `synced`. Solo `400` y `404` son permanentes: el `400` lo evita nuestra propia validación, y un `404` (alojamiento desconocido) hace fallar por igual todos los updates de ese alojamiento, así que el caso solo puede darse por un bug.
 - `recentUpdates`: los últimos 20, del más nuevo al más antiguo.
 - Un alojamiento sin updates devuelve `404`.
 
@@ -178,7 +180,7 @@ Body como en el README. Validación:
 |---|---|---|
 | `sync_tasks_pending` | gauge (de la BD al hacer scrape) | Tamaño del trabajo pendiente. |
 | `sync_oldest_pending_task_age_seconds` | gauge (de la BD al hacer scrape) | ¿Hay algo atascado? |
-| `portal_requests_total{outcome}` | counter | `success`, `rate_limited`, `unavailable`, `timeout`, `network_error`, `client_error`, `unauthorized`, `server_error`. |
+| `portal_requests_total{outcome}` | counter | `success`, `rate_limited`, `unavailable`, `timeout`, `network_error`, `client_error`, `unauthorized`, `server_error`, `unexpected_status`. |
 | `portal_request_duration_seconds{outcome}` | histogram | Latencia del portal. |
 | `sync_retries_total{reason}` | counter | Volumen y causa de los reintentos. |
 | `sync_tasks_finished_total{result}` | counter | `done` o `failed`. |
@@ -194,6 +196,7 @@ Body como en el README. Validación:
 | Credenciales incorrectas | `increase(portal_requests_total{outcome="unauthorized"}[5m]) > 0` | crítica |
 | Portal degradado | ratio de no-éxito > 50 % en 10m (la línea base ronda el 25 %) | aviso |
 | Throttling inesperado | `increase(…{outcome="rate_limited"}[10m]) > 0` (nuestro limitador debería evitarlo) | aviso |
+| Respuestas inesperadas del portal | `increase(…{outcome="unexpected_status"}[10m]) > 0` (código no documentado, que se reintenta) | aviso |
 | Fallos permanentes | `increase(sync_tasks_finished_total{result="failed"}[15m]) > 0` | aviso |
 | Portal lento | p95 de `portal_request_duration_seconds` > 3 s durante 10m | aviso |
 
@@ -255,3 +258,4 @@ Estado deseado por día con fusión de updates (sustituyendo D1); limitador comp
 ### Historial de cambios
 - v1: spec inicial.
 - v2: decisiones tomadas al definir los escenarios de test del core (`docs/TEST-SCENARIOS.md`): patrón del `accommodationId` (va en la ruta de la URL del portal), precio máximo de 1.000.000 y, ante un 429, margen de +500 ms tras el `Retry-After` con 60 s por defecto si falta la cabecera.
+- v3: cambios a raíz de la review de `feature/core`. Solo `400`/`404` son permanentes; cualquier otro código no documentado se reintenta como `unexpected_status`, con alerta, para que no pueda descartar un update aceptado. El `Retry-After` tiene un máximo de 10 min. Queda documentada la limitación conocida de `sync-status`.
