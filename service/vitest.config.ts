@@ -17,6 +17,7 @@ export default defineConfig({
         test: {
           name: 'integration',
           include: ['test/integration/**/*.test.ts'],
+          globalSetup: ['test/support/global-setup.ts'],
           // Real Portal Sol (30 req/min, random 503s) + Postgres: slow by nature.
           testTimeout: 180_000,
           hookTimeout: 60_000,

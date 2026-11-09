@@ -130,7 +130,8 @@ updates (
   date_from date NOT NULL, date_to date NOT NULL,
   available boolean NOT NULL,
   price_per_night numeric(12,2) NOT NULL,
-  accepted_at timestamptz NOT NULL DEFAULT now()
+  accepted_at timestamptz NOT NULL DEFAULT now(),
+  idempotency_key text UNIQUE                  -- optional client key (SPEC §6)
 )
 sync_tasks (
   id              bigserial PRIMARY KEY,      -- send order within an accommodation
@@ -143,6 +144,7 @@ sync_tasks (
   next_attempt_at timestamptz NOT NULL DEFAULT now(),
   locked_until timestamptz,
   last_error text, last_http_status int,
+  last_attempt_at timestamptz,               -- when the last attempt started (sync-status, debugging)
   completed_at timestamptz
 )
 -- indexes: (accommodation_id, status, id), (status, next_attempt_at)
@@ -153,9 +155,9 @@ An update's status is **derived** from its tasks: `failed` if any task failed, `
 ## 6. HTTP API
 
 ### `POST /updates`
-Body as in the README. Validation:
+Body as in the README. Optional header **`Idempotency-Key`** (1–128 characters: letters, digits, `_`, `-`, `.`, `:`). Validation:
 - `accommodationId`: matches `^[A-Za-z0-9_-]{1,64}$`. The id goes into the portal's URL path, so `/`, `..` or spaces must never reach it.
-- `from` and `to`: real `YYYY-MM-DD` dates, with `to >= from` and a range of at most 366 days (configurable).
+- `from` and `to`: real `YYYY-MM-DD` dates, with `to >= from` and a range of at most 366 days (`MAX_UPDATE_RANGE_DAYS`).
 - `available`: boolean.
 - `pricePerNight`: finite number, from 0 to 1,000,000, with at most 2 decimals.
 - Unknown fields are rejected.
@@ -163,7 +165,15 @@ Body as in the README. Validation:
 | Response | When |
 |---|---|
 | `202 { "updateId": 42, "status": "pending", "chunks": 3 }` | Accepted. Returned **after** the transaction commits. |
-| `400 { "error": { "code", "message" } }` | Invalid input (same error shape as the portal). Nothing is persisted. |
+| `400 { "error": { "code", "message" } }` | Invalid input (same error shape as the portal), including malformed JSON. Nothing is persisted. |
+| `413` | Body larger than 1 MB. |
+| `415 UNSUPPORTED_MEDIA_TYPE` | `Content-Type` is not `application/json`. |
+| `400 INVALID_HEADER` | `Idempotency-Key` present but not 1–128 allowed characters. |
+| `202` + `Idempotent-Replayed: true` | Same `Idempotency-Key` and same body as an earlier request: the original response, nothing stored again. |
+| `422 IDEMPOTENCY_KEY_REUSED` | Same `Idempotency-Key` with a different body. |
+| `503 UNAVAILABLE` + `Retry-After: 5` | The database is unavailable or busy (lock timeout). **An update is never acknowledged (`202`) unless it has been committed.** |
+
+Every error, including `404` for unknown routes, uses the same `{ "error": { "code", "message" } }` shape.
 
 ### `GET /accommodations/:id/sync-status`
 
@@ -186,8 +196,9 @@ Body as in the README. Validation:
 
 - `status`: `pending` if any update is pending; otherwise `failed` if the most recent update failed; otherwise `synced`.
   *Known limitation, accepted:* an older failed update over days that a newer synced update does not cover would read `synced`. Only `400` and `404` are permanent: `400` is prevented by our own validation, and `404` (unknown accommodation) fails every update of that accommodation alike, so the case needs a bug to happen.
-- `recentUpdates`: the last 20, newest first.
-- An accommodation with no updates returns `404`.
+- `recentUpdates`: the last 20, newest first; the counts cover every update.
+- Per update, across its chunks: `attempts` is the sum of the chunks' attempts, `lastError` comes from the most recent attempt (`last_attempt_at`), `nextAttemptAt` is the earliest among pending chunks, and `syncedAt` is the last chunk's `completed_at`.
+- An accommodation with no updates returns `404`, and so does an `:id` that does not match the `accommodationId` pattern (no update can exist for it).
 
 **Rationale:** the manager needs to know whether *their* change has arrived. On-call needs to know whether something is stuck and why (attempts, last error, next attempt). Both can be answered from the data D2 already stores.
 
@@ -223,7 +234,13 @@ Body as in the README. Validation:
 
 ## 8. Configuration (env vars)
 
-`PORT=3000`, `DATABASE_URL=postgres://sync:sync@localhost:5432/sync`, `PORTAL_BASE_URL=http://localhost:4000`, `PORTAL_API_KEY=sol-demo-key`, `PORTAL_MAX_REQUESTS_PER_MINUTE=25`, `PORTAL_TIMEOUT_MS=5000`, `WORKER_CONCURRENCY=3`, `TASK_LEASE_MS=30000`, `RETRY_BASE_MS=1000`, `RETRY_MAX_MS=300000`, `WORKER_POLL_MS=500`, `LOG_LEVEL=info`.
+`PORT=3000`, `DATABASE_URL=postgres://sync:sync@localhost:5432/sync`, `PORTAL_BASE_URL=http://localhost:4000`, `PORTAL_API_KEY=sol-demo-key`, `PORTAL_MAX_REQUESTS_PER_MINUTE=25`, `PORTAL_TIMEOUT_MS=5000`, `WORKER_CONCURRENCY=3`, `TASK_LEASE_MS=30000`, `RETRY_BASE_MS=1000`, `RETRY_MAX_MS=300000`, `WORKER_POLL_MS=500`, `LOG_LEVEL=info`, `MAX_UPDATE_RANGE_DAYS=366`, `DATABASE_STARTUP_TIMEOUT_MS=30000`, `SHUTDOWN_GRACE_MS=10000`.
+
+The configuration is validated at startup, and every invalid variable is reported at once. `TASK_LEASE_MS` must be greater than `PORTAL_TIMEOUT_MS` (D6).
+
+**Startup:** the service retries the database connection with backoff for up to `DATABASE_STARTUP_TIMEOUT_MS` (30 s). If it is still unreachable, it exits with a non-zero code without opening the HTTP port, so it never accepts updates it cannot persist. It then applies pending migrations and starts listening. On `SIGTERM` it stops accepting connections, waits for in-flight requests, closes the pool and exits 0; if that takes longer than `SHUTDOWN_GRACE_MS` (10 s) it logs it and exits 1. A failing migration is logged as a structured `fatal` line and exits 1.
+
+**Database resilience at runtime:** losing a connection while running (database restart, failover, an idle connection killed by the server) must never crash the process. The pool's `error` event is logged, the pool reconnects on the next query, and requests in the meantime answer `503`. Every connection has `statement_timeout = 10 s` and `lock_timeout = 5 s`; a lock that cannot be taken in time (for example a stuck transaction on the same accommodation) answers `503`, and HTTP requests time out after 15 s, so nothing hangs indefinitely.
 
 ## 9. Acceptance criteria
 
@@ -252,12 +269,12 @@ Integration tests are slow by nature (the portal allows 30 requests per minute),
 - **Single instance.** The DB claim logic (`SKIP LOCKED`, leases) is already multi-instance safe; only the rate limiter is in-memory. Running several replicas would need a shared limiter (a DB row or Redis).
 - **Polling** the DB every 500 ms instead of `LISTEN/NOTIFY`: simpler, and the latency is negligible next to the portal's limits.
 - **No coalescing.** Superseded updates are still sent. Correct, but wasteful under heavy churn.
-- **No `Idempotency-Key` on `POST /updates`.** A duplicated POST is harmless under D1: the same value is sent twice.
+- **`Idempotency-Key` is optional.** A duplicate is not always harmless under D1. If the connection drops during `COMMIT`, the update may be stored while the client gets a `503` and retries. If the client sent another update B in between, the retried A lands after B and the portal ends with A. With the key, the retry is recognised and nothing is stored again. Clients that do not send it accept that risk. (A per-day desired-state model would not remove it either: a retry is indistinguishable from a new change unless the client identifies it.)
 - **No drift detection.** If someone changes the portal outside this service, we don't notice.
 
 ## 11. Next steps (if there were more time)
 
-Per-day desired state with coalescing (replacing D1); shared rate limiter for multiple instances; manual re-drive of failed updates; periodic reconciliation (`GET` and compare) during idle quota; `LISTEN/NOTIFY`.
+Per-day desired state with coalescing (replacing D1): one row per accommodation and day with the desired value and a version; the worker sends dirty days grouped into ranges and marks them synced only if their version did not change meanwhile. It saves requests when the same days change repeatedly and makes `sync-status` exact per day, at the cost of a new schema, repository and worker. Kept out on purpose: with D1 plus `Idempotency-Key` the final portal state is equally correct, and the API would not change; shared rate limiter for multiple instances; manual re-drive of failed updates; periodic reconciliation (`GET` and compare) during idle quota; `LISTEN/NOTIFY`.
 
 ## 12. Working method
 
@@ -284,3 +301,4 @@ Per-day desired state with coalescing (replacing D1); shared rate limiter for mu
 - v2: decisions taken while defining the core test scenarios (`docs/scenarios/core.md`): `accommodationId` pattern (it goes into the portal URL path), maximum price of 1,000,000, and for a 429 a +500 ms margin after `Retry-After` with a 60 s fallback when the header is missing.
 - v3: changes from the `feature/core` review. Only `400`/`404` are permanent; any other undocumented status is retried as `unexpected_status`, with an alert, so it cannot drop an accepted update. `Retry-After` is capped at 10 min. The known `sync-status` limitation is documented.
 - v4: §3 adds the source layout (tests in their own `test/` tree mirroring `src/`, `domain/` split into `calendar/`, `updates/` and `retry/`), decided before the API block. §12 adds the `refactor/<name>` branch prefix for structural changes without behaviour change.
+- v5: decisions taken while defining the API test scenarios (`docs/scenarios/api.md`). §5: new `sync_tasks.last_attempt_at` column. §6: `413`, `415` and `503` with `Retry-After`; one error shape for every error; `404` for an invalid `:id`; the multi-chunk semantics of `attempts`, `lastError`, `nextAttemptAt` and `syncedAt`. §8: `MAX_UPDATE_RANGE_DAYS`, `DATABASE_STARTUP_TIMEOUT_MS`, config validation, and startup and shutdown behaviour. After the API review: optional `Idempotency-Key` (`updates.idempotency_key`, `422` on reuse, replay header); runtime database resilience (pool errors, `statement_timeout`/`lock_timeout`, request timeout); `SHUTDOWN_GRACE_MS`; §10/§11 explain why duplicates are not always harmless and why the per-day model stays out.

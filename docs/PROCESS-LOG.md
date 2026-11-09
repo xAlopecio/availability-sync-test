@@ -82,3 +82,38 @@ Legend: 🤖 delegated to the AI · 👤 decided or done by the author · ⚠️
   - ⚠️🔍 The AI's first version of the `src/` rule did nothing. ESLint reads `group` patterns with gitignore syntax, where a leading `#` starts a comment, so `#src/**` was ignored. Caught by **probing the rule with a throwaway file**, not by trusting the config; switched to the `regex` option.
   - Accepted: the domain split ("premature", says the reviewer; it is the author's explicit choice, and cheap to revert); the docs commit following the code commit; the scenario-doc move (part of the author's layout decision, which the reviewer cannot see).
 - ⚠️ The AI named this branch `refactor/structure` although SPEC §12 only allowed `feature/` and `docs/`. It flagged the inconsistency itself and proposed fixing it in the next block. 👤 The author decided it belongs **in this same PR**, because it is structural. The rule was folded into SPEC v4, which is not yet merged, rather than opening a v5.
+
+## Phase 4 — API: configuration, persistence and HTTP (`feature/api`)
+
+- 🤖 Drafted ~40 scenarios (`docs/scenarios/api.md`) with 7 open questions. 👤 Paused the block to fix the source layout first (Phase 3b), then approved all 7 decisions, which became SPEC v5.
+- 🤖 Implemented 6 groups red → green, **against real PostgreSQL**: config, migrations, persistence, `POST /updates`, `sync-status`, and the service process. The integration tests use their own databases (`sync_test` and one scratch database per migration and startup test), never the dev one.
+- ⚠️🔍 **The red-step shape mattered twice.**
+  - A throwing pool stub inside `beforeAll` made the whole repository file *skip* instead of fail. The stub became a plain `pg` pool, so that P5/P6 fail on their own assertions.
+  - **P2 passed against the stub** (it only expected *a* rejection, the C10 lesson again). It was tightened to require the `sync_tasks_range_valid` constraint error.
+- ⚠️🔍 **The AI wrote a nonsense assertion** in G8 (it compared a date against a boolean, so it always passed). Caught on rereading before the red commit, and replaced by a real check of `oldestPendingSince`.
+- 🔍 **Mutation checks**, after the C10/C11 lessons:
+  - migrations without the advisory lock fail M3 in 3 runs out of 3;
+  - persistence without the per-accommodation lock fails P3/P4, and without the `DATE` or `NUMERIC` parsers fails P1/P5/P6;
+  - HTTP: 7 mutants, 6 killed. The survivor (the id-pattern guard) is equivalent, since the query then finds nothing and also answers 404.
+- ⚠️🔍 **W2 checked nothing in one assertion.** "No DB connections left after exit" holds even without `pool.end()`, because the OS closes sockets on any exit, and a mutant proved it. It now checks that the logged shutdown steps ran in order, and the same mutant fails it.
+- ⚠️🔍 **Two pieces written by the AI contradicted each other.** The process tests started the service with `PORT=0` (a free port), but the config only accepted 1–65535. The first W1 run exposed it; `PORT=0` is now valid, with its own test (K2b).
+- ⚠️ **A destructive command was blocked**, and rightly so. To undo a mutant, the AI ran `git stash` + `stash drop` on `main.ts`, which would also have discarded uncommitted work (the new shutdown logs). The permission classifier denied it before it ran; nothing was lost. The AI redid it by restoring from a copy, as with the other mutants.
+- 🔍 **Real-world traps covered by tests:**
+  - node-pg turns a `DATE` into a local `Date`, a day early east of UTC; tests run in `Europe/Madrid` to catch it.
+  - Fastify accepts `text/plain` bodies by default, which would have broken the `415`.
+  - A pool without a connection timeout would hang on a hung database instead of answering `503`.
+- 👤 Q3: the integration tests now run in CI against a `postgres:18` service.
+- 🔍 **Review of the block (`deep`): `PROCEED`, "but not mergeable as is".** The reviewer started the service itself and killed its database connections with `pg_terminate_backend`.
+  - ⚠️🔍 **Root risk, HIGH and real:** the process **crashed** when PostgreSQL dropped an idle connection, because the pool's `error` event was unhandled. Our H7 test could not catch it: it used a pool that never connected. Fixed (`fix: survive database failures…`), and W5 now reproduces the reviewer's exact scenario. A mutant without the handler fails it.
+  - Fixed as well:
+    - statement and lock timeouts (H10: a held lock now answers `503` in about 300 ms instead of hanging), plus a request timeout and a forced shutdown after a grace period (W7);
+    - a structured `fatal` on a failing migration (W6);
+    - our error shape for malformed HTTP requests (H11);
+    - accurate body error messages (H12). Probing showed that Fastify itself reports `__proto__` as "not valid JSON", hence our own parser.
+  - 🤖 The reviewer also found a **real design hole the AI had missed**: SPEC §10 claimed that duplicate `POST`s are harmless under D1. They are not: a retry after an ambiguous `COMMIT` can land after a newer update. 👤 The author chose an optional `Idempotency-Key` (P8, H9, migration 002).
+  - The reviewer argued that the per-day desired-state model would close that hole without a key. 👤 The author asked for an explanation before deciding. 🤖 The explanation showed that **the reviewer was wrong on that point**: a retry is indistinguishable from a new change in both models, so only the key closes it. 👤 Kept D1; the per-day model is documented in §11.
+  - Not applicable: "failed with pending chunks". D4 marks the sibling chunks failed, and the reviewer had not been given D4. It becomes a worker scenario.
+  - Accepted: implausible dates (the probe showed the portal accepts them); the cost of reading the full history in `sync-status`.
+  - Deferred: `/health` and readiness → `feature/metrics`; worker column semantics → worker tests.
+- ⚠️🔍 Two more equivalent mutants found and documented: the id-pattern guard on `GET`, and the in-transaction idempotency lookup (the unique-constraint path gives the same result).
+- ⚠️ **Leftover process:** a `node src/main.ts` started by the AI during the restructuring had been listening on port 3998 for hours. The `kill %1` had run in another shell. The reviewer noticed it; the AI confirmed it was its own and stopped it.
