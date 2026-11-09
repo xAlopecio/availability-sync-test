@@ -30,6 +30,9 @@ export function validateUpdateRequest(
   options: { maxRangeDays?: number } = {},
 ): ValidationResult {
   const maxRangeDays = options.maxRangeDays ?? DEFAULT_MAX_RANGE_DAYS;
+  if (!Number.isInteger(maxRangeDays) || maxRangeDays < 1) {
+    throw new RangeError(`maxRangeDays must be a positive integer, got ${maxRangeDays}`);
+  }
   const fail = (code: ValidationErrorCode, message: string): ValidationResult => ({
     ok: false,
     error: { code, message },

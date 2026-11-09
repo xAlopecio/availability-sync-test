@@ -10,6 +10,9 @@ export type RateLimiterOptions = {
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** setTimeout overflows above 2^31 − 1 ms into a 1 ms busy loop; long waits are slept in steps. */
+const MAX_SLEEP_MS = 60_000;
+
 /**
  * Sliding window of request starts plus a global pause (set after a 429). One instance is shared
  * by every worker slot, because the portal's limit is global (SPEC D5).
@@ -32,7 +35,8 @@ export class SlidingWindowRateLimiter {
     }
     this.#limit = options.limit;
     this.#windowMs = options.windowMs;
-    this.#now = options.now ?? (() => Date.now());
+    // Monotonic by default: a wall clock stepping back would stall every send (SPEC D5).
+    this.#now = options.now ?? (() => performance.now());
     this.#sleep = options.sleep ?? defaultSleep;
   }
 
@@ -50,14 +54,14 @@ export class SlidingWindowRateLimiter {
     return { ok: true };
   }
 
-  /** Denies every permit until `until` (epoch ms). Never shortens an existing pause. */
+  /** Denies every permit until `until`, on the limiter's clock. Never shortens an existing pause. */
   pauseUntil(until: number): void {
     this.#pausedUntil = Math.max(this.#pausedUntil, until);
   }
 
   /** Pauses for `ms` from now, on the limiter's own clock. */
-  pauseFor(_ms: number): void {
-    throw new Error('not implemented');
+  pauseFor(ms: number): void {
+    this.pauseUntil(this.#now() + ms);
   }
 
   /** Waits until a permit is free and takes it. */
@@ -65,7 +69,7 @@ export class SlidingWindowRateLimiter {
     for (;;) {
       const result = this.tryAcquire(this.#now());
       if (result.ok) return;
-      await this.#sleep(result.waitMs);
+      await this.#sleep(Math.min(result.waitMs, MAX_SLEEP_MS));
     }
   }
 }

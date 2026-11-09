@@ -6,7 +6,13 @@ export type PortalCallResult =
 
 /** Values of the `outcome` label of `portal_requests_total` (SPEC §7). */
 export type TransientReason =
-  'rate_limited' | 'unavailable' | 'timeout' | 'network_error' | 'server_error' | 'unauthorized';
+  | 'rate_limited'
+  | 'unavailable'
+  | 'timeout'
+  | 'network_error'
+  | 'server_error'
+  | 'unauthorized'
+  | 'unexpected_status';
 
 export type Outcome =
   | { readonly class: 'success'; readonly label: 'success' }
@@ -34,14 +40,20 @@ export function classifyOutcome(result: PortalCallResult, now: number): Outcome 
     return {
       class: 'transient',
       label: 'rate_limited',
-      retryAfterMs: parseRetryAfter(result.retryAfter, now) ?? RATE_LIMIT_FALLBACK_MS,
+      retryAfterMs: Math.min(
+        parseRetryAfter(result.retryAfter, now) ?? RATE_LIMIT_FALLBACK_MS,
+        RATE_LIMIT_MAX_MS,
+      ),
     };
   }
   if (status === 401) return { class: 'transient', label: 'unauthorized' };
-  if (status >= 400 && status < 500) return { class: 'permanent', label: 'client_error', status };
+  // Only the data errors the portal documents are permanent (SPEC D4, v3).
+  if (status === 400 || status === 404)
+    return { class: 'permanent', label: 'client_error', status };
   if (status === 503) return { class: 'transient', label: 'unavailable' };
-  // Other 5xx, and anything we do not understand (1xx, 3xx): retry rather than drop the update.
-  return { class: 'transient', label: 'server_error' };
+  if (status >= 500 && status < 600) return { class: 'transient', label: 'server_error' };
+  // Anything undocumented (other 4xx, 1xx, 3xx): retry and alert rather than drop the update.
+  return { class: 'transient', label: 'unexpected_status' };
 }
 
 /** `Retry-After` is either delay-seconds or an HTTP date (RFC 9110 §10.2.3). */
