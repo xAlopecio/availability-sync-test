@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { splitRange } from './chunking.ts';
-import { addDays, daysInclusive, parseIsoDate, type IsoDate } from './dates.ts';
+import { splitRange } from '#src/domain/calendar/chunking.ts';
+import { addDays, daysInclusive, parseIsoDate, type IsoDate } from '#src/domain/calendar/dates.ts';
 
 const d = (s: string): IsoDate => {
   const parsed = parseIsoDate(s);

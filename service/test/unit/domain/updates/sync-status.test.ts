@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { deriveAccommodationStatus, deriveUpdateStatus, type UpdateStatus } from './sync-status.ts';
+import {
+  deriveAccommodationStatus,
+  deriveUpdateStatus,
+  type UpdateStatus,
+} from '#src/domain/updates/sync-status.ts';
 
 const updates = (...statuses: UpdateStatus[]) =>
   statuses.map((status, i) => ({ updateId: i + 1, status })); // listed oldest → newest

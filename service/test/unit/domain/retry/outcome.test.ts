@@ -4,7 +4,7 @@ import {
   RATE_LIMIT_FALLBACK_MS,
   RATE_LIMIT_MAX_MS,
   type PortalCallResult,
-} from './outcome.ts';
+} from '#src/domain/retry/outcome.ts';
 
 const NOW = Date.parse('2026-11-09T10:00:00.000Z');
 const response = (status: number, retryAfter?: string | null): PortalCallResult =>

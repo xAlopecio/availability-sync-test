@@ -1,4 +1,4 @@
-import { daysInclusive, parseIsoDate, type IsoDate } from './dates.ts';
+import { daysInclusive, parseIsoDate, type IsoDate } from '../calendar/dates.ts';
 
 /** A validated `POST /updates` body. */
 export type UpdateRequest = {

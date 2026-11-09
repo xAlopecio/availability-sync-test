@@ -10,7 +10,7 @@ export default defineConfig({
       {
         test: {
           name: 'unit',
-          include: ['src/**/*.test.ts'],
+          include: ['test/unit/**/*.test.ts'],
         },
       },
       {
