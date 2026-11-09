@@ -27,6 +27,7 @@ Status: **v1, approved by the author** (2026-11-09). The decisions in §8 are cl
 | K6 | `LOG_LEVEL` not a pino level | Throws |
 | K7 | `PORTAL_MAX_REQUESTS_PER_MINUTE` above 30 | **Allowed**: AC6 needs it to provoke 429s |
 | K8 | `MAX_UPDATE_RANGE_DAYS` (see Q6) | Default 366; passed to `validateUpdateRequest` |
+| K9 | `DATABASE_STARTUP_TIMEOUT_MS` — *added while writing W3: a test cannot wait 30 s* | Default 30000; positive integer |
 
 ## 2. Migrations — `src/db/migrate.ts` (I, `test/integration/db/migrate.test.ts`)
 
@@ -85,7 +86,7 @@ Shape as in SPEC §6. "Worker progress" is simulated by updating task rows.
 |---|---|---|
 | W1 | `node src/main.ts` against the test database | Runs the migrations, then listens; `POST /updates` and `GET …/sync-status` work over a real port |
 | W2 | `SIGTERM` | Stops accepting connections, closes the pool, exits with code 0 within a few seconds |
-| W3 | Database unreachable at startup | See Q7 |
+| W3 | Database unreachable at startup (with `DATABASE_STARTUP_TIMEOUT_MS` lowered) | Retries, then exits non-zero with a clear log line, **never** having listened (Q7) |
 | W4 | Every request is logged as JSON; an accepted update logs `updateId`, `accommodationId` and `chunks` | Present in the log output |
 
 ## 7. Test infrastructure — `test/support/`
