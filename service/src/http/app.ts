@@ -13,7 +13,12 @@ export type AppDependencies = {
 
 /** Builds the HTTP app without listening, so tests can drive it with `inject()`. */
 export function buildApp(deps: AppDependencies): FastifyInstance {
-  const app = Fastify({ logger: deps.logger ?? true, bodyLimit: 1_048_576 });
+  const app = Fastify({
+    logger: deps.logger ?? true,
+    bodyLimit: 1_048_576,
+    // A request that is still running after 15 s is answered by Node with 408 (SPEC §8).
+    requestTimeout: 15_000,
+  });
   // Only JSON is accepted: without this, Fastify would parse text/plain bodies too (SPEC §6, 415).
   app.removeContentTypeParser('text/plain');
   registerErrorHandling(app);

@@ -28,16 +28,25 @@ export function createPool(
     onError?: (error: Error) => void;
   } = {},
 ): pg.Pool {
-  return new pg.Pool({
+  const pool = new pg.Pool({
     connectionString,
     max: options.max ?? 10,
     // Without a timeout, a hung database would hang every request instead of answering 503.
     connectionTimeoutMillis: options.connectionTimeoutMs ?? 5_000,
+    // Server-side limits per connection (SPEC §8): nothing waits indefinitely on a stuck query or
+    // on another transaction's lock (for example the per-accommodation advisory lock).
+    statement_timeout: options.statementTimeoutMs ?? 10_000,
+    lock_timeout: options.lockTimeoutMs ?? 5_000,
     types: {
       getTypeParser: ((oid: number, format?: 'text' | 'binary') =>
         PARSERS[oid] ?? pg.types.getTypeParser(oid, format)) as typeof pg.types.getTypeParser,
     },
   });
+  // An idle client that errors (database restart, failover, pg_terminate_backend) is emitted on
+  // the pool. Unhandled, that 'error' event crashes the whole process; handled, the pool drops the
+  // client and the next query opens a new connection (SPEC §8, runtime resilience).
+  pool.on('error', (error) => options.onError?.(error));
+  return pool;
 }
 
 /**

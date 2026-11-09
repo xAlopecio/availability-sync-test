@@ -7,6 +7,8 @@ export type Config = {
   readonly databaseUrl: string;
   /** How long startup keeps retrying an unreachable database before exiting (SPEC §8). */
   readonly databaseStartupTimeoutMs: number;
+  /** How long SIGTERM waits for in-flight work before forcing the exit (SPEC §8). */
+  readonly shutdownGraceMs: number;
   readonly logLevel: LogLevel;
   readonly maxUpdateRangeDays: number;
   readonly portal: {
@@ -90,6 +92,7 @@ export function loadConfig(env: Env): Config {
     port,
     databaseUrl,
     databaseStartupTimeoutMs: int('DATABASE_STARTUP_TIMEOUT_MS', 30000),
+    shutdownGraceMs: int('SHUTDOWN_GRACE_MS', 10000),
     logLevel: logLevel as LogLevel,
     maxUpdateRangeDays: int('MAX_UPDATE_RANGE_DAYS', 366),
     portal: {

@@ -26,7 +26,9 @@ export function isDatabaseUnavailable(error: unknown): boolean {
   const { code, message } = error as { code?: unknown; message?: unknown };
   if (typeof code === 'string') {
     if (NETWORK_CODES.has(code)) return true;
-    if (/^(08|53|57P)/.test(code)) return true;
+    // 08 connection, 53 resources, 57P operator intervention; 55P03 lock_timeout and 57014
+    // statement_timeout: the database is busy, so the caller should retry, like for an outage.
+    if (/^(08|53|57P|55P03$|57014$)/.test(code)) return true;
   }
   if (
     typeof message === 'string' &&
@@ -66,7 +68,7 @@ export function registerErrorHandling(app: FastifyInstance): void {
       return reply
         .code(503)
         .header('retry-after', String(DB_UNAVAILABLE_RETRY_AFTER_S))
-        .send(errorBody('UNAVAILABLE', 'The service cannot store updates right now; retry later'));
+        .send(errorBody('UNAVAILABLE', 'The database is unavailable or busy; retry later'));
     }
     request.log.error({ err: error }, 'unhandled error');
     return reply.code(500).send(errorBody('INTERNAL', 'Internal error'));
