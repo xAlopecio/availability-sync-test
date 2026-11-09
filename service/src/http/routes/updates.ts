@@ -1,9 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
-import { acceptUpdate } from '../../db/repository.ts';
+import { acceptUpdate, IdempotencyKeyReusedError } from '../../db/repository.ts';
 import { splitRange } from '../../domain/calendar/chunking.ts';
 import { validateUpdateRequest } from '../../domain/updates/update-validation.ts';
 import { errorBody } from '../errors.ts';
+
+/** SPEC §6: 1–128 characters, letters, digits and `_ - . :`. */
+export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 
 export function registerUpdateRoutes(
   app: FastifyInstance,
@@ -14,18 +17,45 @@ export function registerUpdateRoutes(
     if (!result.ok) {
       return reply.code(400).send(errorBody(result.error.code, result.error.message));
     }
+    const header = request.headers['idempotency-key'];
+    const idempotencyKey = Array.isArray(header) ? header[0] : header;
+    if (idempotencyKey !== undefined && !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
+      return reply
+        .code(400)
+        .send(
+          errorBody(
+            'INVALID_HEADER',
+            'Idempotency-Key must be 1-128 characters: A-Z a-z 0-9 _ - . :',
+          ),
+        );
+    }
     const update = result.value;
     const chunks = splitRange(update.from, update.to);
-    // Only after the commit: a 202 always means the update is persisted (SPEC §6, AC1).
-    const accepted = await acceptUpdate(deps.pool, update, chunks);
+    let accepted;
+    try {
+      // Only after the commit: a 202 always means the update is persisted (SPEC §6, AC1).
+      accepted = await acceptUpdate(
+        deps.pool,
+        update,
+        chunks,
+        idempotencyKey === undefined ? {} : { idempotencyKey },
+      );
+    } catch (error) {
+      if (error instanceof IdempotencyKeyReusedError) {
+        return reply.code(422).send(errorBody('IDEMPOTENCY_KEY_REUSED', error.message));
+      }
+      throw error;
+    }
     request.log.info(
       {
         updateId: accepted.updateId,
         accommodationId: update.accommodationId,
         chunks: accepted.chunks,
+        replayed: accepted.replayed,
       },
-      'update accepted',
+      accepted.replayed ? 'update replayed (idempotency key)' : 'update accepted',
     );
+    if (accepted.replayed) reply.header('idempotent-replayed', 'true');
     return reply
       .code(202)
       .send({ updateId: accepted.updateId, status: 'pending', chunks: accepted.chunks });

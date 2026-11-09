@@ -34,17 +34,34 @@ export async function acceptUpdate(
   pool: pg.Pool,
   request: UpdateRequest,
   chunks: readonly DateRange[],
-  _options: { idempotencyKey?: string } = {},
+  options: { idempotencyKey?: string } = {},
 ): Promise<AcceptedUpdate> {
+  const key = options.idempotencyKey;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     // Taken before any id is allocated, so ids for one accommodation follow commit order (D1).
+    // It also serialises concurrent requests that reuse one key for the same accommodation.
     await client.query(ACCOMMODATION_LOCK_SQL, [request.accommodationId]);
+    if (key !== undefined) {
+      const existing = await findByIdempotencyKey(client, key);
+      if (existing) {
+        await client.query('COMMIT');
+        return replayOrConflict(existing, request, key);
+      }
+    }
     const { rows } = await client.query<{ id: number }>(
-      `INSERT INTO updates (accommodation_id, date_from, date_to, available, price_per_night)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [request.accommodationId, request.from, request.to, request.available, request.pricePerNight],
+      `INSERT INTO updates (accommodation_id, date_from, date_to, available, price_per_night,
+                            idempotency_key)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [
+        request.accommodationId,
+        request.from,
+        request.to,
+        request.available,
+        request.pricePerNight,
+        key ?? null,
+      ],
     );
     const updateId = rows[0]!.id;
     // One insert per chunk, in order: at most 12 for a 366-day update.
@@ -59,10 +76,60 @@ export async function acceptUpdate(
     return { updateId, chunks: chunks.length, replayed: false };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
+    // The same key used concurrently for another accommodation: that request holds a different
+    // lock, so the unique constraint is what decides. Re-read the winner outside the transaction.
+    if (key !== undefined && isUniqueViolation(error, 'updates_idempotency_key_unique')) {
+      const existing = await findByIdempotencyKey(pool, key);
+      if (existing) return replayOrConflict(existing, request, key);
+    }
     throw error;
   } finally {
     client.release();
   }
+}
+
+type StoredUpdate = {
+  readonly id: number;
+  readonly accommodation_id: string;
+  readonly date_from: string;
+  readonly date_to: string;
+  readonly available: boolean;
+  readonly price_per_night: number;
+  readonly chunks: number;
+};
+
+async function findByIdempotencyKey(
+  db: Pick<pg.Pool, 'query'>,
+  key: string,
+): Promise<StoredUpdate | undefined> {
+  const { rows } = await db.query<StoredUpdate>(
+    `SELECT u.id, u.accommodation_id, u.date_from, u.date_to, u.available, u.price_per_night,
+            (SELECT count(*) FROM sync_tasks t WHERE t.update_id = u.id) AS chunks
+       FROM updates u WHERE u.idempotency_key = $1`,
+    [key],
+  );
+  return rows[0];
+}
+
+/** Same key and same body → the original update; same key, different body → conflict. */
+function replayOrConflict(
+  existing: StoredUpdate,
+  request: UpdateRequest,
+  key: string,
+): AcceptedUpdate {
+  const same =
+    existing.accommodation_id === request.accommodationId &&
+    existing.date_from === request.from &&
+    existing.date_to === request.to &&
+    existing.available === request.available &&
+    existing.price_per_night === request.pricePerNight;
+  if (!same) throw new IdempotencyKeyReusedError(key);
+  return { updateId: existing.id, chunks: existing.chunks, replayed: true };
+}
+
+function isUniqueViolation(error: unknown, constraint: string): boolean {
+  const e = error as { code?: unknown; constraint?: unknown };
+  return e.code === '23505' && e.constraint === constraint;
 }
 
 /** One accepted update with its tasks aggregated, for `sync-status` (SPEC §6). */
