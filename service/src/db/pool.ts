@@ -17,10 +17,15 @@ const PARSERS: Partial<Record<number, (value: string) => unknown>> = {
  * A pool whose type parsers return what the domain expects (SPEC D8): `DATE` as the raw
  * `YYYY-MM-DD` string, `NUMERIC` and `INT8` as numbers. Scoped to this pool, never global.
  */
-export function createPool(connectionString: string, options: { max?: number } = {}): pg.Pool {
+export function createPool(
+  connectionString: string,
+  options: { max?: number; connectionTimeoutMs?: number } = {},
+): pg.Pool {
   return new pg.Pool({
     connectionString,
     max: options.max ?? 10,
+    // Without a timeout, a hung database would hang every request instead of answering 503.
+    connectionTimeoutMillis: options.connectionTimeoutMs ?? 5_000,
     types: {
       getTypeParser: ((oid: number, format?: 'text' | 'binary') =>
         PARSERS[oid] ?? pg.types.getTypeParser(oid, format)) as typeof pg.types.getTypeParser,
