@@ -9,13 +9,32 @@ import type { UpdateRequest } from '../domain/updates/update-validation.ts';
  */
 export const ACCOMMODATION_LOCK_SQL = 'SELECT pg_advisory_xact_lock(1, hashtext($1))';
 
-export type AcceptedUpdate = { readonly updateId: number; readonly chunks: number };
+export type AcceptedUpdate = {
+  readonly updateId: number;
+  readonly chunks: number;
+  /** True when an earlier request with the same Idempotency-Key was returned instead. */
+  readonly replayed: boolean;
+};
+
+/** The Idempotency-Key was already used for a different update (SPEC §6, 422). */
+export class IdempotencyKeyReusedError extends Error {
+  readonly idempotencyKey: string;
+
+  constructor(idempotencyKey: string) {
+    super(
+      `Idempotency-Key ${JSON.stringify(idempotencyKey)} was already used for a different update`,
+    );
+    this.name = 'IdempotencyKeyReusedError';
+    this.idempotencyKey = idempotencyKey;
+  }
+}
 
 /** Stores an update and its ≤ 31-day tasks in one transaction (D2). */
 export async function acceptUpdate(
   pool: pg.Pool,
   request: UpdateRequest,
   chunks: readonly DateRange[],
+  _options: { idempotencyKey?: string } = {},
 ): Promise<AcceptedUpdate> {
   const client = await pool.connect();
   try {
@@ -37,7 +56,7 @@ export async function acceptUpdate(
       );
     }
     await client.query('COMMIT');
-    return { updateId, chunks: chunks.length };
+    return { updateId, chunks: chunks.length, replayed: false };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     throw error;

@@ -158,4 +158,40 @@ describe('POST /updates', () => {
       await busyPool.end();
     }
   });
+
+  describe('Idempotency-Key (H9)', () => {
+    it('H9: a replay returns the original 202 with Idempotent-Replayed and stores nothing', async () => {
+      const first = await post(readme, { 'idempotency-key': 'order-42:v1' });
+      expect(first.statusCode).toBe(202);
+      expect(first.headers['idempotent-replayed']).toBeUndefined();
+      const replay = await post(readme, { 'idempotency-key': 'order-42:v1' });
+      expect(replay.statusCode).toBe(202);
+      expect(replay.headers['idempotent-replayed']).toBe('true');
+      expect(replay.json()).toEqual(first.json());
+      expect(await rowCounts()).toEqual({ updates: 1, tasks: 1 });
+    });
+
+    it('H9: the same key with a different body is 422 IDEMPOTENCY_KEY_REUSED', async () => {
+      await post(readme, { 'idempotency-key': 'k-1' });
+      const res = await post({ ...readme, pricePerNight: 130 }, { 'idempotency-key': 'k-1' });
+      expect(res.statusCode).toBe(422);
+      expect(errorCodeOf(res.json())).toBe('IDEMPOTENCY_KEY_REUSED');
+      expect(await rowCounts()).toEqual({ updates: 1, tasks: 1 });
+    });
+
+    it.each(['', 'x'.repeat(129), 'has space', 'ñ'])(
+      'H9: an invalid key (%j) is 400 INVALID_HEADER and stores nothing',
+      async (key) => {
+        const res = await post(readme, { 'idempotency-key': key });
+        expect(res.statusCode).toBe(400);
+        expect(errorCodeOf(res.json())).toBe('INVALID_HEADER');
+        expect(await rowCounts()).toEqual({ updates: 0, tasks: 0 });
+      },
+    );
+
+    it('H9: a 128-character key with every allowed character is accepted', async () => {
+      const key = ('Az09_-.:' as string).repeat(16);
+      expect((await post(readme, { 'idempotency-key': key })).statusCode).toBe(202);
+    });
+  });
 });

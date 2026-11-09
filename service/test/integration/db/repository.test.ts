@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { createPool } from '#src/db/pool.ts';
 import { databaseUrl } from '../../support/test-db.ts';
-import { ACCOMMODATION_LOCK_SQL, acceptUpdate } from '#src/db/repository.ts';
+import {
+  ACCOMMODATION_LOCK_SQL,
+  acceptUpdate,
+  IdempotencyKeyReusedError,
+} from '#src/db/repository.ts';
 import { anUpdate, chunksOf, day } from '../../support/fixtures.ts';
 import { useMigratedDatabase } from '../../support/migrated-db.ts';
 
@@ -14,7 +18,7 @@ describe('acceptUpdate', () => {
     const request = anUpdate({ from: day('2026-11-09'), to: day('2027-02-06') }); // 90 days
     const before = Date.now();
     const accepted = await acceptUpdate(db.pool(), request, chunksOf(request));
-    expect(accepted).toEqual({ updateId: 1, chunks: 3 });
+    expect(accepted).toEqual({ updateId: 1, chunks: 3, replayed: false });
 
     const update = (await db.pool().query('SELECT * FROM updates')).rows;
     expect(update).toHaveLength(1);
@@ -137,5 +141,56 @@ describe('createPool', () => {
     } finally {
       await pool.end();
     }
+  });
+});
+
+describe('acceptUpdate with an Idempotency-Key (P8)', () => {
+  const accept = (request = anUpdate(), idempotencyKey?: string) =>
+    acceptUpdate(db.pool(), request, chunksOf(request), idempotencyKey ? { idempotencyKey } : {});
+
+  it('P8: a new key is stored with the update', async () => {
+    expect(await accept(anUpdate(), 'k-1')).toEqual({ updateId: 1, chunks: 1, replayed: false });
+    const { rows } = await db.pool().query('SELECT idempotency_key FROM updates');
+    expect(rows).toEqual([{ idempotency_key: 'k-1' }]);
+  });
+
+  it('P8: the same key and body returns the original update and stores nothing', async () => {
+    const request = anUpdate({ from: day('2026-11-09'), to: day('2027-02-06') });
+    const first = await accept(request, 'k-1');
+    expect(await accept(request, 'k-1')).toEqual({ ...first, replayed: true });
+    expect([await count('updates'), await count('sync_tasks')]).toEqual([1, 3]);
+  });
+
+  it('P8: the same key with a different body is a conflict and stores nothing', async () => {
+    await accept(anUpdate({ pricePerNight: 120 }), 'k-1');
+    await expect(accept(anUpdate({ pricePerNight: 130 }), 'k-1')).rejects.toBeInstanceOf(
+      IdempotencyKeyReusedError,
+    );
+    expect(await count('updates')).toBe(1);
+  });
+
+  it('P8: concurrent requests with the same key and body store exactly one update', async () => {
+    const request = anUpdate();
+    const results = await Promise.all(Array.from({ length: 10 }, () => accept(request, 'k-1')));
+    expect(await count('updates')).toBe(1);
+    expect(new Set(results.map((r) => r.updateId)).size).toBe(1);
+    expect(results.filter((r) => !r.replayed)).toHaveLength(1);
+  });
+
+  it('P8: concurrent use of one key for two accommodations stores one and rejects the other', async () => {
+    const outcomes = await Promise.allSettled([
+      accept(anUpdate({ accommodationId: 'acc-1001' }), 'k-1'),
+      accept(anUpdate({ accommodationId: 'acc-1002' }), 'k-1'),
+    ]);
+    expect(await count('updates')).toBe(1);
+    expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
+    const rejected = outcomes.find((o) => o.status === 'rejected');
+    expect((rejected as PromiseRejectedResult).reason).toBeInstanceOf(IdempotencyKeyReusedError);
+  });
+
+  it('P8: without a key, identical requests are two updates (nothing is deduplicated)', async () => {
+    await accept();
+    await accept();
+    expect(await count('updates')).toBe(2);
   });
 });

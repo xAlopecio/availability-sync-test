@@ -168,6 +168,7 @@ Body as in the README. Optional header **`Idempotency-Key`** (1–128 characters
 | `400 { "error": { "code", "message" } }` | Invalid input (same error shape as the portal), including malformed JSON. Nothing is persisted. |
 | `413` | Body larger than 1 MB. |
 | `415 UNSUPPORTED_MEDIA_TYPE` | `Content-Type` is not `application/json`. |
+| `400 INVALID_HEADER` | `Idempotency-Key` present but not 1–128 allowed characters. |
 | `202` + `Idempotent-Replayed: true` | Same `Idempotency-Key` and same body as an earlier request: the original response, nothing stored again. |
 | `422 IDEMPOTENCY_KEY_REUSED` | Same `Idempotency-Key` with a different body. |
 | `503 UNAVAILABLE` + `Retry-After: 5` | The database is unavailable or busy (lock timeout). **An update is never acknowledged (`202`) unless it has been committed.** |
