@@ -28,7 +28,7 @@ Commands (run from `service/`):
 | `npm run format` / `npm run format:check` | Prettier (single quotes, width 100, trailing commas). |
 | `npm run check` | typecheck + lint + format check + unit tests. **Must pass before every commit.** |
 | `npm test` | Unit tests (`src/**/*.test.ts`). Fast, no Docker needed. |
-| `npm run test:integration` | Integration tests (`test/integration/`) against real Portal Sol + Postgres. Slow: the portal allows 30 req/min. |
+| `npm run test:integration` | Integration tests (`test/integration/`) against real Portal Sol + Postgres. Slow: the portal rate-limits requests (30 req/min in the `base` variant). |
 
 TypeScript is pinned to **5.9.x**: typescript-eslint supports TS < 6.1, so do not upgrade to TS 7.
 
@@ -72,7 +72,7 @@ The agent is required to find at least 3 risks, so not every risk is a real prob
 - Branches: `master` (stable, receives `develop` only at phase close, via PR and with a tag) ← `develop` ← `feature/<name>` or `docs/<name>`. **Never commit to `master` or `develop` directly.**
 - Planned branches: `feature/setup`, `feature/core`, `feature/api`, `feature/worker`, `feature/metrics`, `feature/e2e`, `docs/process`.
 - Small Conventional Commits (`feat:`, `test:`, `fix:`, `refactor:`, `docs:`, `chore:`), with a scope when useful (`feat(worker): …`). In TDD, the failing test and its implementation may be separate commits.
-- Integrate through GitHub PRs into `develop` (`gh pr create --base develop`). The user reviews and merges.
+- Integrate through GitHub PRs into `develop` (`gh pr create --base develop`). CI (`.github/workflows/ci.yml`) runs `npm run check` on every PR and must be green. The user reviews and merges.
 
 ## Documentation rules
 
