@@ -29,6 +29,7 @@ Status: **v1, approved by the author** (2026-11-09). The decisions in §8 are cl
 | K7 | `PORTAL_MAX_REQUESTS_PER_MINUTE` above 30 | **Allowed**: AC6 needs it to provoke 429s |
 | K8 | `MAX_UPDATE_RANGE_DAYS` (see Q6) | Default 366; passed to `validateUpdateRequest` |
 | K9 | `DATABASE_STARTUP_TIMEOUT_MS` — *added while writing W3: a test cannot wait 30 s* | Default 30000; positive integer |
+| K10 | `SHUTDOWN_GRACE_MS` — *added after the review* | Default 10000; positive integer |
 
 ## 2. Migrations — `src/db/migrate.ts` (I, `test/integration/db/migrate.test.ts`)
 
@@ -51,6 +52,8 @@ Numbered `.sql` files in `db/migrations/`, applied at startup, recorded in `sche
 | P4 / D1 | Concurrent accepts for **different** accommodations | They do not wait on each other (the lock is per accommodation) |
 | P5 | `pricePerNight` `19.99` and `1000000` | Read back exactly (`numeric(12,2)` → number, never `19.989999…`) |
 | P6 | Dates read back from `DATE` columns, with tests running in `Europe/Madrid` | Exactly `YYYY-MM-DD`, never shifted a day. node-pg's default parses `DATE` into a local JS `Date`, so a type parser is required |
+| P7 | Every pooled connection has `statement_timeout = 10s` and `lock_timeout = 5s` — *added after the review* | `SHOW` returns them |
+| P8 | Idempotency in `acceptUpdate`: a new key is stored; the same key and body returns the original `updateId` with `replayed: true` and stores nothing; the same key with a different body is a conflict; **concurrent** requests with the same key store one update — *added after the review* | As stated |
 
 ## 4. `POST /updates` — `src/http/routes/updates.ts` (I, `test/integration/http/updates.test.ts`)
 
@@ -64,6 +67,10 @@ Numbered `.sql` files in `db/migrations/`, applied at startup, recorded in `sche
 | H6 | Body larger than the limit (1 MB) | `413` in our error shape |
 | H7 / AC1 | Database unavailable | `503 { error: { code: "UNAVAILABLE" } }`. **Never a `202` without a commit**: an acknowledged update is a persisted update |
 | H8 | Unknown route or method | `404` in our error shape |
+| H9 | `Idempotency-Key`: replay → `202` + `Idempotent-Replayed: true` and the same body; different body → `422 IDEMPOTENCY_KEY_REUSED`; invalid key (empty, 129 chars, spaces) → `400` — *added after the review* | Row counts prove nothing is stored twice |
+| H10 | Another transaction holds the accommodation's lock longer than `lock_timeout` — *added after the review* | `503` + `Retry-After`, nothing stored, other accommodations unaffected |
+| H11 | A malformed HTTP request (raw socket) — *added after the review* | `400` in our error shape, not Fastify's default |
+| H12 | A body with `__proto__` — *added after the review: the message said "not valid JSON" twice* | `400 INVALID_BODY` with an accurate message |
 
 ## 5. `GET /accommodations/:id/sync-status` — `src/http/routes/sync-status.ts` (I, `test/integration/http/sync-status.test.ts`)
 
@@ -80,6 +87,7 @@ Shape as in SPEC §6. "Worker progress" is simulated by updating task rows.
 | G7 | Retries in progress: chunks with attempts 2 and 3, the last one with an error | `attempts: 5` (sum over chunks), `lastError` from the most recent attempt, `nextAttemptAt` = earliest pending chunk (see Q5) |
 | G8 | 25 updates | `recentUpdates` has the newest 20, newest first; the counts cover all 25 |
 | G9 | Updates of other accommodations | Never included in the response |
+| G10 | Database unavailable on `GET` — *added after the review* | `503` with a message that does not talk about storing updates |
 
 ## 6. Wiring and startup — `src/http/app.ts`, `src/main.ts` (I, `test/integration/startup.test.ts`)
 
@@ -89,6 +97,9 @@ Shape as in SPEC §6. "Worker progress" is simulated by updating task rows.
 | W2 | `SIGTERM` | Stops accepting connections, closes the pool, exits with code 0 within a few seconds |
 | W3 | Database unreachable at startup (with `DATABASE_STARTUP_TIMEOUT_MS` lowered) | Retries, then exits non-zero with a clear log line, **never** having listened (Q7) |
 | W4 | Every request is logged as JSON; an accepted update logs `updateId`, `accommodationId` and `chunks` | Present in the log output |
+| W5 | **PostgreSQL kills the service's connections while it runs** (`pg_terminate_backend`) — *added after the review: the process crashed (HIGH)* | The process stays up, logs the pool error as JSON, and the next `POST` is `202` |
+| W6 | A migration fails at startup — *added after the review* | A structured `fatal` log line, exit code 1, never listening |
+| W7 | `SIGTERM` while a request is stuck longer than `SHUTDOWN_GRACE_MS` — *added after the review* | Logs the timeout and exits 1 within about the grace period |
 
 ## 7. Test infrastructure — `test/support/`
 

@@ -132,7 +132,8 @@ updates (
   date_from date NOT NULL, date_to date NOT NULL,
   available boolean NOT NULL,
   price_per_night numeric(12,2) NOT NULL,
-  accepted_at timestamptz NOT NULL DEFAULT now()
+  accepted_at timestamptz NOT NULL DEFAULT now(),
+  idempotency_key text UNIQUE                  -- clave opcional del cliente (SPEC §6)
 )
 sync_tasks (
   id              bigserial PRIMARY KEY,      -- orden de envío dentro de un alojamiento
@@ -156,7 +157,7 @@ El estado de un update se **deduce** de sus tareas: `failed` si alguna falló, `
 ## 6. API HTTP
 
 ### `POST /updates`
-Body como en el README. Validación:
+Body como en el README. Cabecera opcional **`Idempotency-Key`** (1–128 caracteres: letras, dígitos, `_`, `-`, `.`, `:`). Validación:
 - `accommodationId`: cumple `^[A-Za-z0-9_-]{1,64}$`. El id va dentro de la ruta de la URL del portal, así que `/`, `..` o espacios nunca deben llegar a ella.
 - `from` y `to`: fechas `YYYY-MM-DD` reales, con `to >= from` y un rango de 366 días como mucho (`MAX_UPDATE_RANGE_DAYS`).
 - `available`: booleano.
@@ -169,7 +170,9 @@ Body como en el README. Validación:
 | `400 { "error": { "code", "message" } }` | Entrada inválida (mismo formato de error que el portal), incluido un JSON mal formado. No se persiste nada. |
 | `413` | Body de más de 1 MB. |
 | `415 UNSUPPORTED_MEDIA_TYPE` | El `Content-Type` no es `application/json`. |
-| `503 UNAVAILABLE` + `Retry-After: 5` | La base de datos no está disponible. **Un update nunca se confirma (`202`) sin haberse guardado.** |
+| `202` + `Idempotent-Replayed: true` | Misma `Idempotency-Key` y mismo body que una petición anterior: la respuesta original, sin guardar nada de nuevo. |
+| `422 IDEMPOTENCY_KEY_REUSED` | Misma `Idempotency-Key` con un body distinto. |
+| `503 UNAVAILABLE` + `Retry-After: 5` | La base de datos no está disponible o está ocupada (timeout de bloqueo). **Un update nunca se confirma (`202`) sin haberse guardado.** |
 
 Todos los errores, incluido el `404` de rutas desconocidas, usan el mismo formato `{ "error": { "code", "message" } }`.
 
@@ -232,11 +235,13 @@ Todos los errores, incluido el `404` de rutas desconocidas, usan el mismo format
 
 ## 8. Configuración (variables de entorno)
 
-`PORT=3000`, `DATABASE_URL=postgres://sync:sync@localhost:5432/sync`, `PORTAL_BASE_URL=http://localhost:4000`, `PORTAL_API_KEY=sol-demo-key`, `PORTAL_MAX_REQUESTS_PER_MINUTE=25`, `PORTAL_TIMEOUT_MS=5000`, `WORKER_CONCURRENCY=3`, `TASK_LEASE_MS=30000`, `RETRY_BASE_MS=1000`, `RETRY_MAX_MS=300000`, `WORKER_POLL_MS=500`, `LOG_LEVEL=info`, `MAX_UPDATE_RANGE_DAYS=366`, `DATABASE_STARTUP_TIMEOUT_MS=30000`.
+`PORT=3000`, `DATABASE_URL=postgres://sync:sync@localhost:5432/sync`, `PORTAL_BASE_URL=http://localhost:4000`, `PORTAL_API_KEY=sol-demo-key`, `PORTAL_MAX_REQUESTS_PER_MINUTE=25`, `PORTAL_TIMEOUT_MS=5000`, `WORKER_CONCURRENCY=3`, `TASK_LEASE_MS=30000`, `RETRY_BASE_MS=1000`, `RETRY_MAX_MS=300000`, `WORKER_POLL_MS=500`, `LOG_LEVEL=info`, `MAX_UPDATE_RANGE_DAYS=366`, `DATABASE_STARTUP_TIMEOUT_MS=30000`, `SHUTDOWN_GRACE_MS=10000`.
 
 La configuración se valida al arrancar, y se informa de todas las variables inválidas a la vez. `TASK_LEASE_MS` debe ser mayor que `PORTAL_TIMEOUT_MS` (D6).
 
-**Arranque:** el servicio reintenta la conexión con la base de datos con backoff durante `DATABASE_STARTUP_TIMEOUT_MS` como mucho (30 s). Si sigue sin poder conectar, sale con un código distinto de cero sin abrir el puerto HTTP, para no aceptar nunca updates que no pueda guardar. Después aplica las migraciones pendientes y empieza a escuchar. Con `SIGTERM` deja de aceptar conexiones, cierra el pool y termina.
+**Arranque:** el servicio reintenta la conexión con la base de datos con backoff durante `DATABASE_STARTUP_TIMEOUT_MS` como mucho (30 s). Si sigue sin poder conectar, sale con un código distinto de cero sin abrir el puerto HTTP, para no aceptar nunca updates que no pueda guardar. Después aplica las migraciones pendientes y empieza a escuchar. Con `SIGTERM` deja de aceptar conexiones, espera a las peticiones en curso, cierra el pool y termina con 0; si tarda más de `SHUTDOWN_GRACE_MS` (10 s), lo registra y termina con 1. Una migración que falla se registra como una línea `fatal` estructurada y termina con 1.
+
+**Resiliencia de la base de datos en ejecución:** perder una conexión con el servicio en marcha (reinicio de la base de datos, failover, una conexión inactiva cortada por el servidor) nunca debe tumbar el proceso. El evento `error` del pool se registra, el pool vuelve a conectar en la siguiente consulta y, mientras tanto, las peticiones responden `503`. Cada conexión tiene `statement_timeout = 10 s` y `lock_timeout = 5 s`; un bloqueo que no se consigue a tiempo (por ejemplo, una transacción atascada sobre el mismo alojamiento) responde `503`, y las peticiones HTTP expiran a los 15 s, así que nada se queda colgado indefinidamente.
 
 ## 9. Criterios de aceptación
 
@@ -265,12 +270,12 @@ Los tests de integración son lentos por naturaleza (el portal admite 30 peticio
 - **Una sola instancia.** La lógica de reclamación en BD (`SKIP LOCKED`, leases) ya es segura con varias instancias; solo el limitador vive en memoria. Varias réplicas necesitarían un limitador compartido (una fila en la BD o Redis).
 - **Polling** a la BD cada 500 ms en lugar de `LISTEN/NOTIFY`: más simple, y la latencia es despreciable frente a los límites del portal.
 - **Sin fusión de updates.** Los updates ya superados por otros se envían igualmente. Es correcto, pero desperdicia peticiones si hay muchos cambios.
-- **Sin `Idempotency-Key` en `POST /updates`.** Un POST duplicado es inofensivo con D1: el mismo valor se envía dos veces.
+- **`Idempotency-Key` es opcional.** Un duplicado no siempre es inofensivo con D1. Si la conexión cae durante el `COMMIT`, el update puede quedar guardado mientras el cliente recibe un `503` y reintenta. Si el cliente envió otro update B entre medias, el A reintentado llega después de B y el portal termina con A. Con la clave, el reintento se reconoce y no se guarda nada de nuevo. Los clientes que no la envían asumen ese riesgo. (Un modelo de estado deseado por día tampoco lo eliminaría: un reintento es indistinguible de un cambio nuevo salvo que el cliente lo identifique.)
 - **Sin detección de deriva.** Si alguien cambia el portal por fuera de este servicio, no nos enteramos.
 
 ## 11. Siguientes pasos (con más tiempo)
 
-Estado deseado por día con fusión de updates (sustituyendo D1); limitador compartido para varias instancias; relanzar a mano los updates fallidos; reconciliación periódica (`GET` y comparar) con el cupo libre; `LISTEN/NOTIFY`.
+Estado deseado por día con fusión de updates (sustituyendo D1): una fila por alojamiento y día con el valor deseado y una versión; el worker envía los días pendientes agrupados en rangos y los marca como sincronizados solo si su versión no cambió mientras tanto. Ahorra peticiones cuando los mismos días cambian repetidamente y hace `sync-status` exacto por día, a costa de un esquema, un repositorio y un worker nuevos. Se deja fuera a propósito: con D1 más `Idempotency-Key` el estado final del portal es igual de correcto, y la API no cambiaría; limitador compartido para varias instancias; relanzar a mano los updates fallidos; reconciliación periódica (`GET` y comparar) con el cupo libre; `LISTEN/NOTIFY`.
 
 ## 12. Método de trabajo
 
@@ -297,4 +302,4 @@ Estado deseado por día con fusión de updates (sustituyendo D1); limitador comp
 - v2: decisiones tomadas al definir los escenarios de test del core (`docs/scenarios/core.md`): patrón del `accommodationId` (va en la ruta de la URL del portal), precio máximo de 1.000.000 y, ante un 429, margen de +500 ms tras el `Retry-After` con 60 s por defecto si falta la cabecera.
 - v3: cambios a raíz de la review de `feature/core`. Solo `400`/`404` son permanentes; cualquier otro código no documentado se reintenta como `unexpected_status`, con alerta, para que no pueda descartar un update aceptado. El `Retry-After` tiene un máximo de 10 min. Queda documentada la limitación conocida de `sync-status`.
 - v4: §3 añade la organización del código (tests en su propio árbol `test/` que replica `src/`, y `domain/` dividido en `calendar/`, `updates/` y `retry/`), decidida antes del bloque de la API. La §12 añade el prefijo de rama `refactor/<nombre>` para cambios estructurales sin cambio de comportamiento.
-- v5: decisiones tomadas al definir los escenarios de test de la API (`docs/scenarios/api.md`). §5: nueva columna `sync_tasks.last_attempt_at`. §6: `413`, `415` y `503` con `Retry-After`; un único formato para todos los errores; `404` para un `:id` inválido; la semántica de `attempts`, `lastError`, `nextAttemptAt` y `syncedAt` en updates con varios trozos. §8: `MAX_UPDATE_RANGE_DAYS`, `DATABASE_STARTUP_TIMEOUT_MS`, validación de la configuración, y comportamiento al arrancar y al apagar.
+- v5: decisiones tomadas al definir los escenarios de test de la API (`docs/scenarios/api.md`). §5: nueva columna `sync_tasks.last_attempt_at`. §6: `413`, `415` y `503` con `Retry-After`; un único formato para todos los errores; `404` para un `:id` inválido; la semántica de `attempts`, `lastError`, `nextAttemptAt` y `syncedAt` en updates con varios trozos. §8: `MAX_UPDATE_RANGE_DAYS`, `DATABASE_STARTUP_TIMEOUT_MS`, validación de la configuración, y comportamiento al arrancar y al apagar. Tras la review de la API: `Idempotency-Key` opcional (`updates.idempotency_key`, `422` si se reutiliza, cabecera de repetición); resiliencia de la base de datos en ejecución (errores del pool, `statement_timeout`/`lock_timeout`, timeout por petición); `SHUTDOWN_GRACE_MS`; §10/§11 explican por qué los duplicados no siempre son inofensivos y por qué el modelo por día queda fuera.
