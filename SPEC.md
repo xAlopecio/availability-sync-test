@@ -235,7 +235,12 @@ Per-day desired state with coalescing (replacing D1); shared rate limiter for mu
 
 ## 12. Working method
 
-- **Spec first** (this document is the first commit), then small commits that tell the story (conventional-commit style).
+- **Spec first** (this document is the first commit), then small commits that tell the story (Conventional Commits: `feat:`, `test:`, `fix:`, `refactor:`, `docs:`, `chore:`).
+- **Branching.**
+  - `master` is the stable branch and only receives `develop` when a phase is closed, via PR and with a version tag.
+  - `develop` is the integration branch.
+  - Each block of work goes on its own `feature/<name>` (or `docs/<name>`) branch cut from `develop`, and is merged back through a **GitHub PR**.
+  - Nothing is committed directly to `master` or `develop`.
 - **TDD for `domain/` and the limiter:** write the scenarios from §9 as failing tests, implement, then refactor.
 - **Integration tests** for the behaviours that only the real portal can prove (AC4–AC9, AC12–AC13).
 - **AI-assisted.** A `CLAUDE.md` holds the stack, conventions, environment setup and the "tests first" rule. Two project skills:
@@ -247,3 +252,4 @@ Per-day desired state with coalescing (replacing D1); shared rate limiter for mu
 
 ### Changelog
 - v1: initial spec.
+- v2: §12 adds the branching strategy (`master` / `develop` / `feature/*`, integration through PRs).
