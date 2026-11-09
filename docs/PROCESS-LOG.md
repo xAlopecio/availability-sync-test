@@ -70,3 +70,9 @@ Legend: 🤖 delegated to the AI · 👤 decided or done by the author · ⚠️
   - First run: **11 survived**. Real gaps: the 2xx/5xx upper bounds, an empty `Retry-After` (it would have retried immediately instead of waiting 60 s), the letter guard before `Date.parse`, the `to` = `from` − 1 boundary, and the order of date errors.
   - ⚠️🔍 One of the new tests was itself wrong: `"2030"` was meant to reach the date path, but it is read as delay-seconds first. It **failed against the correct code**, which exposed the mistaken assumption, and it was replaced by `"2030-01-01"`.
   - Final: outcome 19/19 killed, validation 20/22. The 2 survivors are proven equivalent mutants (redundant guards), documented in `docs/scenarios/core.md` §9.
+
+## Phase 3b — Source layout (`refactor/structure`)
+
+- 👤 Before starting the API block, the author noticed in the editor that tests sat next to the code in `src/domain/` (12 mixed files), while `test/integration/` existed but was empty. They asked for a solid structure **before** writing more code. 🤖 Proposed the full target tree for every remaining block. 👤 Chose: tests in their own `test/` tree mirroring `src/`, `domain/` split by topic (`calendar/`, `updates/`, `retry/`, against the AI's suggestion to keep it flat), and `docs/scenarios/`.
+- 🤖 Moved the files with `git mv` (history kept, renames detected) and added the `#src/*` subpath import so that tests do not use `../../../src`. Checked that **Node, `tsc` and Vitest** all resolve it natively before relying on it. Recorded the layout in SPEC v4 §3, `CLAUDE.md`, the `tdd-cycle` skill and the README.
+- ⚠️🔍 The AI's first commit swept in a docs rename already staged by `git mv`, and a later `git add` failed silently on a path that no longer existed (the error was redirected to `/dev/null`). Caught by reading `git show --stat` before pushing. The two commits were redone so that code and docs are separate. Lesson: do not hide `git` errors.
