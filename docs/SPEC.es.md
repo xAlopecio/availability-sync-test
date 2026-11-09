@@ -145,6 +145,7 @@ sync_tasks (
   next_attempt_at timestamptz NOT NULL DEFAULT now(),
   locked_until timestamptz,
   last_error text, last_http_status int,
+  last_attempt_at timestamptz,               -- cuándo empezó el último intento (sync-status, depuración)
   completed_at timestamptz
 )
 -- índices: (accommodation_id, status, id), (status, next_attempt_at)
@@ -157,7 +158,7 @@ El estado de un update se **deduce** de sus tareas: `failed` si alguna falló, `
 ### `POST /updates`
 Body como en el README. Validación:
 - `accommodationId`: cumple `^[A-Za-z0-9_-]{1,64}$`. El id va dentro de la ruta de la URL del portal, así que `/`, `..` o espacios nunca deben llegar a ella.
-- `from` y `to`: fechas `YYYY-MM-DD` reales, con `to >= from` y un rango de 366 días como mucho (configurable).
+- `from` y `to`: fechas `YYYY-MM-DD` reales, con `to >= from` y un rango de 366 días como mucho (`MAX_UPDATE_RANGE_DAYS`).
 - `available`: booleano.
 - `pricePerNight`: número finito, de 0 a 1.000.000, con 2 decimales como mucho.
 - Se rechazan los campos desconocidos.
@@ -165,7 +166,12 @@ Body como en el README. Validación:
 | Respuesta | Cuándo |
 |---|---|
 | `202 { "updateId": 42, "status": "pending", "chunks": 3 }` | Aceptado. Se devuelve **después** de confirmar la transacción. |
-| `400 { "error": { "code", "message" } }` | Entrada inválida (mismo formato de error que el portal). No se persiste nada. |
+| `400 { "error": { "code", "message" } }` | Entrada inválida (mismo formato de error que el portal), incluido un JSON mal formado. No se persiste nada. |
+| `413` | Body de más de 1 MB. |
+| `415 UNSUPPORTED_MEDIA_TYPE` | El `Content-Type` no es `application/json`. |
+| `503 UNAVAILABLE` + `Retry-After: 5` | La base de datos no está disponible. **Un update nunca se confirma (`202`) sin haberse guardado.** |
+
+Todos los errores, incluido el `404` de rutas desconocidas, usan el mismo formato `{ "error": { "code", "message" } }`.
 
 ### `GET /accommodations/:id/sync-status`
 
@@ -188,8 +194,9 @@ Body como en el README. Validación:
 
 - `status`: `pending` si hay algún update pendiente; si no, `failed` si falló el update más reciente; si no, `synced`.
   *Limitación conocida, aceptada:* un update antiguo fallido sobre días que no cubre un update posterior sincronizado se mostraría como `synced`. Solo `400` y `404` son permanentes: el `400` lo evita nuestra propia validación, y un `404` (alojamiento desconocido) hace fallar por igual todos los updates de ese alojamiento, así que el caso solo puede darse por un bug.
-- `recentUpdates`: los últimos 20, del más nuevo al más antiguo.
-- Un alojamiento sin updates devuelve `404`.
+- `recentUpdates`: los últimos 20, del más nuevo al más antiguo; los contadores cubren todos los updates.
+- Por update, sumando sus trozos: `attempts` es la suma de los intentos de los trozos, `lastError` viene del intento más reciente (`last_attempt_at`), `nextAttemptAt` es el más próximo entre los trozos pendientes, y `syncedAt` es el `completed_at` del último trozo.
+- Un alojamiento sin updates devuelve `404`, y también un `:id` que no cumple el patrón de `accommodationId` (no puede existir ningún update para él).
 
 **Justificación:** el gestor necesita saber si *su* cambio ha llegado. Quien está de guardia necesita saber si algo está atascado y por qué (intentos, último error, próximo intento). Las dos cosas se responden con los datos que D2 ya guarda.
 
@@ -225,7 +232,11 @@ Body como en el README. Validación:
 
 ## 8. Configuración (variables de entorno)
 
-`PORT=3000`, `DATABASE_URL=postgres://sync:sync@localhost:5432/sync`, `PORTAL_BASE_URL=http://localhost:4000`, `PORTAL_API_KEY=sol-demo-key`, `PORTAL_MAX_REQUESTS_PER_MINUTE=25`, `PORTAL_TIMEOUT_MS=5000`, `WORKER_CONCURRENCY=3`, `TASK_LEASE_MS=30000`, `RETRY_BASE_MS=1000`, `RETRY_MAX_MS=300000`, `WORKER_POLL_MS=500`, `LOG_LEVEL=info`.
+`PORT=3000`, `DATABASE_URL=postgres://sync:sync@localhost:5432/sync`, `PORTAL_BASE_URL=http://localhost:4000`, `PORTAL_API_KEY=sol-demo-key`, `PORTAL_MAX_REQUESTS_PER_MINUTE=25`, `PORTAL_TIMEOUT_MS=5000`, `WORKER_CONCURRENCY=3`, `TASK_LEASE_MS=30000`, `RETRY_BASE_MS=1000`, `RETRY_MAX_MS=300000`, `WORKER_POLL_MS=500`, `LOG_LEVEL=info`, `MAX_UPDATE_RANGE_DAYS=366`.
+
+La configuración se valida al arrancar, y se informa de todas las variables inválidas a la vez. `TASK_LEASE_MS` debe ser mayor que `PORTAL_TIMEOUT_MS` (D6).
+
+**Arranque:** el servicio reintenta la conexión con la base de datos con backoff durante 30 s como mucho. Si sigue sin poder conectar, sale con un código distinto de cero sin abrir el puerto HTTP, para no aceptar nunca updates que no pueda guardar. Después aplica las migraciones pendientes y empieza a escuchar. Con `SIGTERM` deja de aceptar conexiones, cierra el pool y termina.
 
 ## 9. Criterios de aceptación
 
@@ -286,3 +297,4 @@ Estado deseado por día con fusión de updates (sustituyendo D1); limitador comp
 - v2: decisiones tomadas al definir los escenarios de test del core (`docs/scenarios/core.md`): patrón del `accommodationId` (va en la ruta de la URL del portal), precio máximo de 1.000.000 y, ante un 429, margen de +500 ms tras el `Retry-After` con 60 s por defecto si falta la cabecera.
 - v3: cambios a raíz de la review de `feature/core`. Solo `400`/`404` son permanentes; cualquier otro código no documentado se reintenta como `unexpected_status`, con alerta, para que no pueda descartar un update aceptado. El `Retry-After` tiene un máximo de 10 min. Queda documentada la limitación conocida de `sync-status`.
 - v4: §3 añade la organización del código (tests en su propio árbol `test/` que replica `src/`, y `domain/` dividido en `calendar/`, `updates/` y `retry/`), decidida antes del bloque de la API. La §12 añade el prefijo de rama `refactor/<nombre>` para cambios estructurales sin cambio de comportamiento.
+- v5: decisiones tomadas al definir los escenarios de test de la API (`docs/scenarios/api.md`). §5: nueva columna `sync_tasks.last_attempt_at`. §6: `413`, `415` y `503` con `Retry-After`; un único formato para todos los errores; `404` para un `:id` inválido; la semántica de `attempts`, `lastError`, `nextAttemptAt` y `syncedAt` en updates con varios trozos. §8: `MAX_UPDATE_RANGE_DAYS`, validación de la configuración, y comportamiento al arrancar y al apagar.
