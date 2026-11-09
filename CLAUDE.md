@@ -50,19 +50,20 @@ TypeScript is pinned to **5.9.x**: typescript-eslint supports TS < 6.1, so do no
 - Never weaken or delete a test just to make it pass. If a test looks wrong, say so and explain why.
 - Portal 503s are random (~24 %), so integration tests must tolerate retries. Do not mock the portal in integration tests.
 
-## Pre-commit review
+## PR review (one per block of work)
 
-Before committing code (`feat`, `fix` or `refactor`), run `npm run check` and then launch the **`review` agent** (`.claude/agents/review.md`). Pure `docs`/`chore` commits and the red step of TDD (`test(...)`) skip the review unless the user asks for one.
+Commits inside a branch only need `npm run check` to pass. When a block of work (a `feature/*` branch) is finished, and **before opening its PR**, launch the **`review` agent** (`.claude/agents/review.md`) over the whole block.
 
 The agent receives **exactly three inputs, and none of our reasoning**:
-1. `problem_statement`: the SPEC sections and ACs the change implements, quoted verbatim.
+1. `problem_statement`: the SPEC sections and ACs the block implements, quoted verbatim.
 2. `constraints_contract`: external constraints only, taken from `README.md` and `API.md` (Node + TS, PostgreSQL, no lost updates, portal limits, 31-day ranges, idempotent PUT). Never our own design decisions.
-3. `implementation_output`: `git diff --staged`.
+3. `implementation_output`: `git diff develop...HEAD`.
 
-Mode: `fast` for local changes; `deep` when the change touches a SPEC decision (D1–D8), the data model or the worker's concurrency.
+Mode: `fast` for tooling or local blocks; `deep` when the block touches a SPEC decision (D1–D8), the data model or the worker's concurrency.
 
-- `STOP_AND_REPLAN` → do not commit. Report to the user.
-- `PROCEED` → show the user the risks found, and say which ones we address and which we accept, with the reason.
+- `STOP_AND_REPLAN` → do not open the PR. Report to the user.
+- `PROCEED` → show the user the risks found, and say which ones we address and which we accept, with the reason. Fixes go in new commits on the same branch.
+- Once the PR is open, add a comment with the decision, the risks, and what was addressed or accepted, as evidence for the reviewer.
 
 The agent is required to find at least 3 risks, so not every risk is a real problem: the user decides. Record what the review caught (or got wrong) for `PROCESS.md`.
 
