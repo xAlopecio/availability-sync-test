@@ -40,10 +40,23 @@ Through environment variables. Defaults suit the local `docker compose` setup.
 
 The full list (rate limit, timeouts, worker concurrency, retries) is in SPEC §8.
 
+## Project layout
+
+```
+src/          production code: domain/ (pure logic), portal/, db/, http/, worker/, metrics/
+test/unit/    unit tests, mirroring src/
+test/integration/   tests against real PostgreSQL (and Portal Sol)
+test/e2e/     the whole service against the real portal
+test/support/ shared test helpers
+```
+
+Tests import production code as `#src/...` (Node subpath import, see `package.json`). The full layout is described in SPEC §3.
+
 ## Tests and checks
 
 ```bash
 npm test                    # unit tests: fast, no Docker needed
 npm run test:integration    # against the real Portal Sol + PostgreSQL (start them first); slow by design
+npm run test:e2e            # the whole service against the real portal; the slowest suite
 npm run check               # typecheck + lint + format check + unit tests (also runs in CI on every PR)
 ```

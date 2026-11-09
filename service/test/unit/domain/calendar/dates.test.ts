@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addDays, daysInclusive, parseIsoDate, type IsoDate } from './dates.ts';
+import { addDays, daysInclusive, parseIsoDate, type IsoDate } from '#src/domain/calendar/dates.ts';
 
 const d = (s: string): IsoDate => {
   const parsed = parseIsoDate(s);

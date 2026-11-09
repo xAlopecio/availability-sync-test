@@ -43,6 +43,29 @@ Un único proceso ejecuta la API HTTP y el worker. Módulos principales:
 - `http/` — rutas Fastify y validación.
 - `metrics/` — registro de `prom-client`.
 
+Organización del código (`service/`): el código de producción en `src/` y todos los tests en `test/`.
+
+```
+src/
+  main.ts  config.ts
+  domain/            lógica pura, sin E/S
+    calendar/        fechas, troceo de rangos
+    updates/         validación de peticiones, derivación del estado
+    retry/           clasificación de respuestas, backoff
+  portal/            cliente de Portal Sol, limitador
+  db/                migrations/*.sql, migrate, pool, repository
+  http/              app Fastify, formato de error, routes/
+  worker/            reclamar, enviar, registrar resultados
+  metrics/           registro de prom-client
+test/
+  unit/              replica src/ (rápidos, sin Docker)
+  integration/       PostgreSQL real (y más adelante Portal Sol)
+  e2e/               el servicio completo contra el portal real
+  support/           helpers comunes: BD de test, fixtures, admin del portal
+```
+
+Los tests importan el código de producción con el subpath import de Node `#src/*` (`imports` en `package.json`), que Node, TypeScript y Vitest resuelven de forma nativa.
+
 Stack: **Fastify, pino (logs JSON), `pg`, `prom-client`, Vitest**. Node 24 (`.nvmrc`).
 
 ## 4. Decisiones de diseño clave
@@ -244,7 +267,10 @@ Estado deseado por día con fusión de updates (sustituyendo D1); limitador comp
 - **Ramas.**
   - `master` es la rama estable y solo recibe `develop` al cerrar una fase, mediante PR y con un tag de versión.
   - `develop` es la rama de integración.
-  - Cada bloque de trabajo va en su propia rama `feature/<nombre>` (o `docs/<nombre>`), que sale de `develop` y vuelve a ella mediante un **PR en GitHub**.
+  - Cada bloque de trabajo va en su propia rama, que sale de `develop` y vuelve a ella mediante un **PR en GitHub**. El prefijo indica qué tipo de bloque es:
+    - `feature/<nombre>`: comportamiento nuevo.
+    - `refactor/<nombre>`: cambio estructural sin cambio de comportamiento (p. ej. `refactor/structure`).
+    - `docs/<nombre>`: solo documentación.
   - Nunca se commitea directamente en `master` ni en `develop`.
 - **TDD para `domain/` y el limitador:** escribir los escenarios de §9 como tests que fallan, implementar y después refactorizar.
 - **Tests de integración** para los comportamientos que solo el portal real puede demostrar (AC4–AC9, AC12–AC13).
@@ -257,5 +283,6 @@ Estado deseado por día con fusión de updates (sustituyendo D1); limitador comp
 
 ### Historial de cambios
 - v1: spec inicial.
-- v2: decisiones tomadas al definir los escenarios de test del core (`docs/TEST-SCENARIOS.md`): patrón del `accommodationId` (va en la ruta de la URL del portal), precio máximo de 1.000.000 y, ante un 429, margen de +500 ms tras el `Retry-After` con 60 s por defecto si falta la cabecera.
+- v2: decisiones tomadas al definir los escenarios de test del core (`docs/scenarios/core.md`): patrón del `accommodationId` (va en la ruta de la URL del portal), precio máximo de 1.000.000 y, ante un 429, margen de +500 ms tras el `Retry-After` con 60 s por defecto si falta la cabecera.
 - v3: cambios a raíz de la review de `feature/core`. Solo `400`/`404` son permanentes; cualquier otro código no documentado se reintenta como `unexpected_status`, con alerta, para que no pueda descartar un update aceptado. El `Retry-After` tiene un máximo de 10 min. Queda documentada la limitación conocida de `sync-status`.
+- v4: §3 añade la organización del código (tests en su propio árbol `test/` que replica `src/`, y `domain/` dividido en `calendar/`, `updates/` y `retry/`), decidida antes del bloque de la API. La §12 añade el prefijo de rama `refactor/<nombre>` para cambios estructurales sin cambio de comportamiento.

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SlidingWindowRateLimiter } from './rate-limiter.ts';
+import { SlidingWindowRateLimiter } from '#src/portal/rate-limiter.ts';
 
 const WINDOW = 60_000;
 const limiter = (limit: number, windowMs = WINDOW) =>

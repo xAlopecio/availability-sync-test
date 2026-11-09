@@ -6,12 +6,16 @@
   "engines": {
     "node": ">=24"
   },
+  "imports": {
+    "#src/*": "./src/*"
+  },
   "scripts": {
     "start": "node src/main.ts",
     "dev": "node --watch src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
+    "test:e2e": "vitest run --project e2e",
     "test:all": "vitest run",
     "test:watch": "vitest --project unit",
     "lint": "eslint .",

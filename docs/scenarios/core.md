@@ -8,7 +8,7 @@ Status: **v1, approved by the author** (2026-11-09). The decisions in §8 are cl
 
 ---
 
-## 1. Calendar dates — `domain/dates.ts`
+## 1. Calendar dates — `domain/calendar/dates.ts`
 
 Dates are calendar days (`YYYY-MM-DD`, no time or zone), as in `API.md`. Arithmetic is done on UTC day numbers, so the host time zone can never shift a day.
 
@@ -23,7 +23,7 @@ Dates are calendar days (`YYYY-MM-DD`, no time or zone), as in `API.md`. Arithme
 | D7 | `addDays`: across month end, year end and leap day (`2028-02-28` + 1 = `2028-02-29`, + 2 = `2028-03-01`) | as stated |
 | D8 | DST change days (`2026-03-29`, `2026-10-25` in Europe): consecutive days still advance by exactly 1 | no skipped or duplicated day |
 
-## 2. Range chunking — `domain/chunking.ts` (AC3)
+## 2. Range chunking — `domain/calendar/chunking.ts` (AC3)
 
 `splitRange(from, to, maxDays = 31)` returns consecutive chunks of at most `maxDays` days, inclusive at both ends.
 
@@ -41,7 +41,7 @@ Dates are calendar days (`YYYY-MM-DD`, no time or zone), as in `API.md`. Arithme
 | C10 | `to < from` (programming error: validation runs first) | throws |
 | C11 | `maxDays` not a positive integer (`0`, `-1`, `1.5`, `NaN`) — *added during implementation: `0` made the loop infinite* | throws `RangeError` |
 
-## 3. Update validation — `domain/update-validation.ts` (AC2)
+## 3. Update validation — `domain/updates/update-validation.ts` (AC2)
 
 `validateUpdateRequest(body: unknown)` returns `{ ok: true, value }` or `{ ok: false, error: { code, message } }`. The codes mirror the portal's (`INVALID_BODY`, `INVALID_DATE`, `RANGE_TOO_LARGE`), and the message names the field. When several things are wrong, the first error in field order is returned.
 
@@ -62,7 +62,7 @@ Dates are calendar days (`YYYY-MM-DD`, no time or zone), as in `API.md`. Arithme
 | V13 | Dates in the past | ok (see Q1) |
 | V14 | `maxRangeDays` option not a positive integer (`NaN`, `0`, `1.5`) — *added after the review: `NaN` silently disabled the check* | throws `RangeError` |
 
-## 4. Portal outcome classification — `domain/outcome.ts` (AC10)
+## 4. Portal outcome classification — `domain/retry/outcome.ts` (AC10)
 
 `classifyOutcome(result, now)` maps what happened to a portal call to `success`, `transient` (with a `reason` and an optional `retryAfterMs`) or `permanent`. The `reason` values are the `outcome` labels of the `portal_requests_total` metric in SPEC §7.
 
@@ -82,7 +82,7 @@ Dates are calendar days (`YYYY-MM-DD`, no time or zone), as in `API.md`. Arithme
 | O12 | Any undocumented status: other 4xx (`408`, `409`, `413`, `422`), `1xx`, `3xx` — *changed in SPEC v3* | transient `unexpected_status`: never drop an update on something we don't understand |
 | O13 | `429` + an absurd `Retry-After` (`99999999999`, or an HTTP date a month away) — *added after the review* | `retryAfterMs` capped at 10 min |
 
-## 5. Retry scheduling — `domain/backoff.ts` (AC10)
+## 5. Retry scheduling — `domain/retry/backoff.ts` (AC10)
 
 `nextAttemptAt({ attempt, outcome, now, random, baseMs, maxMs })`. Here `attempt` is the number of attempts already made (≥ 1), and `random()` is injected, returning a value in `[0, 1)`.
 
@@ -113,7 +113,7 @@ A sliding window of `limit` request starts per `windowMs` (default 25 per 60 s),
 | R10 | A long pause (2 h) in async `acquire()` — *added after the review: waits above 2³¹ ms overflow `setTimeout` into a 1 ms busy loop* | every individual sleep ≤ 60 s; resolves when the pause ends |
 | R11 | `pauseFor(ms)` is relative to the limiter's own clock, which is monotonic (`performance.now()`) — *added after the review: a wall clock stepping back would stall everything* | denied until `now + ms`, then allowed |
 
-## 7. Sync status derivation — `domain/sync-status.ts` (supports AC12)
+## 7. Sync status derivation — `domain/updates/sync-status.ts` (supports AC12)
 
 | Id | Scenario | Expected |
 |---|---|---|
@@ -147,7 +147,7 @@ Hand-written mutants (one change at a time, the module's tests run, the source r
 | Module | Mutants | Killed first run | Gaps found → cases added | Final |
 |---|---|---|---|---|
 | `portal/rate-limiter.ts` | 2 | 2 | — | 2/2 killed |
-| `domain/outcome.ts` | 19 | 13 | `299` success / `300` unexpected (2xx upper bound); `599` server_error, `600`/`199` unexpected; empty `Retry-After`; `2030-01-01` (no letters, so not an HTTP date); an HTTP date equal to now; `" 17 "` with whitespace | **19/19 killed** |
-| `domain/update-validation.ts` | 22 | 16 | the error message for non-object bodies; `to` = `from` − 1 boundary; `from` named first when both dates are invalid | **20/22 killed**, 2 equivalent |
+| `domain/retry/outcome.ts` | 19 | 13 | `299` success / `300` unexpected (2xx upper bound); `599` server_error, `600`/`199` unexpected; empty `Retry-After`; `2030-01-01` (no letters, so not an HTTP date); an HTTP date equal to now; `" 17 "` with whitespace | **19/19 killed** |
+| `domain/updates/update-validation.ts` | 22 | 16 | the error message for non-object bodies; `to` = `from` − 1 boundary; `from` named first when both dates are invalid | **20/22 killed**, 2 equivalent |
 
 **Equivalent mutants (cannot be killed, by construction):** removing `typeof value !== 'number'` or `!Number.isFinite(value)` from the price check. Each is redundant with the other checks: `Number.isFinite('120')` is `false` (no coercion), `NaN` fails the `toFixed(2)` round trip, and `Infinity` fails the maximum. Both stay because they make the intent explicit, and `typeof` narrows the TypeScript type.

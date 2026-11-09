@@ -10,7 +10,7 @@ export default defineConfig({
       {
         test: {
           name: 'unit',
-          include: ['src/**/*.test.ts'],
+          include: ['test/unit/**/*.test.ts'],
         },
       },
       {
@@ -20,6 +20,16 @@ export default defineConfig({
           // Real Portal Sol (30 req/min, random 503s) + Postgres: slow by nature.
           testTimeout: 180_000,
           hookTimeout: 60_000,
+          fileParallelism: false,
+        },
+      },
+      {
+        test: {
+          name: 'e2e',
+          include: ['test/e2e/**/*.test.ts'],
+          // The whole service against the real portal: the slowest suite.
+          testTimeout: 600_000,
+          hookTimeout: 120_000,
           fileParallelism: false,
         },
       },

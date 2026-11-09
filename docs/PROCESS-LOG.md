@@ -45,7 +45,7 @@ Legend: 🤖 delegated to the AI · 👤 decided or done by the author · ⚠️
 
 ## Phase 3 — Core domain logic with TDD (`feature/core`)
 
-- 👤 Insisted that the scenarios be defined **before** any test. 🤖 Wrote `docs/TEST-SCENARIOS.md` (~60 scenarios, 7 modules, 6 open questions). 👤 Approved them all (`add901b`).
+- 👤 Insisted that the scenarios be defined **before** any test. 🤖 Wrote the core test scenarios (now `docs/scenarios/core.md`; ~60 scenarios, 7 modules, 6 open questions). 👤 Approved them all (`add901b`).
 - 🔍 Writing the scenarios exposed a spec gap: SPEC only required a "non-empty" `accommodationId`, but the id goes into the portal URL path, so `../x` or `a/b` would change the request. The pattern `^[A-Za-z0-9_-]{1,64}$` and the other approved decisions went into **SPEC v2** (`de907c1`).
 - 🤖 Implemented the 7 modules red → green, with one commit per step. Every red step was checked to fail **with "not implemented"**, not with an import or syntax error.
 - ⚠️🔍 **C10 passed against the stub.** It only asserted that *something* was thrown, and the stub throws. It was tightened to the specific `RangeError` before committing the red step (`68bf4fb`).
@@ -69,4 +69,16 @@ Legend: 🤖 delegated to the AI · 👤 decided or done by the author · ⚠️
 - 👤 Asked for the deliberate-defect check (mutation testing) to be extended from the rate limiter to `outcome` and `validation`. 🤖 Wrote a throwaway script with 41 hand-written mutants.
   - First run: **11 survived**. Real gaps: the 2xx/5xx upper bounds, an empty `Retry-After` (it would have retried immediately instead of waiting 60 s), the letter guard before `Date.parse`, the `to` = `from` − 1 boundary, and the order of date errors.
   - ⚠️🔍 One of the new tests was itself wrong: `"2030"` was meant to reach the date path, but it is read as delay-seconds first. It **failed against the correct code**, which exposed the mistaken assumption, and it was replaced by `"2030-01-01"`.
-  - Final: outcome 19/19 killed, validation 20/22. The 2 survivors are proven equivalent mutants (redundant guards), documented in `TEST-SCENARIOS.md` §9.
+  - Final: outcome 19/19 killed, validation 20/22. The 2 survivors are proven equivalent mutants (redundant guards), documented in `docs/scenarios/core.md` §9.
+
+## Phase 3b — Source layout (`refactor/structure`)
+
+- 👤 Before starting the API block, the author noticed in the editor that tests sat next to the code in `src/domain/` (12 mixed files), while `test/integration/` existed but was empty. They asked for a solid structure **before** writing more code. 🤖 Proposed the full target tree for every remaining block. 👤 Chose: tests in their own `test/` tree mirroring `src/`, `domain/` split by topic (`calendar/`, `updates/`, `retry/`, against the AI's suggestion to keep it flat), and `docs/scenarios/`.
+- 🤖 Moved the files with `git mv` (history kept, renames detected) and added the `#src/*` subpath import so that tests do not use `../../../src`. Checked that **Node, `tsc` and Vitest** all resolve it natively before relying on it. Recorded the layout in SPEC v4 §3, `CLAUDE.md`, the `tdd-cycle` skill and the README.
+- ⚠️🔍 The AI's first commit swept in a docs rename already staged by `git mv`, and a later `git add` failed silently on a path that no longer existed (the error was redirected to `/dev/null`). Caught by reading `git show --stat` before pushing. The two commits were redone so that code and docs are separate. Lesson: do not hide `git` errors.
+- 🔍 **Review (`fast`): `PROCEED`**, no root risk. The reviewer verified by itself that behaviour is unchanged, that `#src` resolves in plain Node, and that `git log --follow` still reaches the original TDD commits. Outcome (`fix(service): make misplaced tests…`):
+  - Fixed: tests placed in `test/e2e/` or inside `src/` would have been **skipped silently**. Added an `e2e` Vitest project, plus a layout test that fails on misplaced test files.
+  - Fixed: nothing enforced the import convention. Added ESLint rules in both directions.
+  - ⚠️🔍 The AI's first version of the `src/` rule did nothing. ESLint reads `group` patterns with gitignore syntax, where a leading `#` starts a comment, so `#src/**` was ignored. Caught by **probing the rule with a throwaway file**, not by trusting the config; switched to the `regex` option.
+  - Accepted: the domain split ("premature", says the reviewer; it is the author's explicit choice, and cheap to revert); the docs commit following the code commit; the scenario-doc move (part of the author's layout decision, which the reviewer cannot see).
+- ⚠️ The AI named this branch `refactor/structure` although SPEC §12 only allowed `feature/` and `docs/`. It flagged the inconsistency itself and proposed fixing it in the next block. 👤 The author decided it belongs **in this same PR**, because it is structural. The rule was folded into SPEC v4, which is not yet merged, rather than opening a v5.

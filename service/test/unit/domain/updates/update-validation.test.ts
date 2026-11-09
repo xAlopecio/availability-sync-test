@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { validateUpdateRequest, type ValidationErrorCode } from './update-validation.ts';
+import {
+  validateUpdateRequest,
+  type ValidationErrorCode,
+} from '#src/domain/updates/update-validation.ts';
 
 const valid = {
   accommodationId: 'acc-1003',

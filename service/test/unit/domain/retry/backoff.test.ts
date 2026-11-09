@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { backoffCeilingMs, DEFAULT_RETRY_POLICY, nextAttemptAt } from './backoff.ts';
+import {
+  backoffCeilingMs,
+  DEFAULT_RETRY_POLICY,
+  nextAttemptAt,
+} from '#src/domain/retry/backoff.ts';
 
 const NOW = 1_000_000;
 const unavailable = { class: 'transient', label: 'unavailable' } as const;

@@ -41,6 +41,29 @@ One process runs both the HTTP API and the worker. Main modules:
 - `http/` — Fastify routes and validation.
 - `metrics/` — `prom-client` registry.
 
+Source layout (`service/`): production code in `src/`, every test in `test/`.
+
+```
+src/
+  main.ts  config.ts
+  domain/            pure logic, no I/O
+    calendar/        dates, range chunking
+    updates/         request validation, status derivation
+    retry/           outcome classification, backoff
+  portal/            Portal Sol client, rate limiter
+  db/                migrations/*.sql, migrate, pool, repository
+  http/              Fastify app, error format, routes/
+  worker/            claim, send, record outcomes
+  metrics/           prom-client registry
+test/
+  unit/              mirrors src/ (fast, no Docker)
+  integration/       real PostgreSQL (and later Portal Sol)
+  e2e/               the whole service against the real portal
+  support/           shared helpers: test database, fixtures, portal admin
+```
+
+Tests import production code through the Node subpath import `#src/*` (`package.json` `imports`), which Node, TypeScript and Vitest all resolve natively.
+
 Stack: **Fastify, pino (JSON logs), `pg`, `prom-client`, Vitest**. Node 24 (`.nvmrc`).
 
 ## 4. Key design decisions
@@ -242,7 +265,10 @@ Per-day desired state with coalescing (replacing D1); shared rate limiter for mu
 - **Branching.**
   - `master` is the stable branch and only receives `develop` when a phase is closed, via PR and with a version tag.
   - `develop` is the integration branch.
-  - Each block of work goes on its own `feature/<name>` (or `docs/<name>`) branch cut from `develop`, and is merged back through a **GitHub PR**.
+  - Each block of work goes on its own branch cut from `develop`, and is merged back through a **GitHub PR**. The prefix says what kind of block it is:
+    - `feature/<name>`: new behaviour.
+    - `refactor/<name>`: structural change with no behaviour change (e.g. `refactor/structure`).
+    - `docs/<name>`: documentation only.
   - Nothing is committed directly to `master` or `develop`.
 - **TDD for `domain/` and the limiter:** write the scenarios from §9 as failing tests, implement, then refactor.
 - **Integration tests** for the behaviours that only the real portal can prove (AC4–AC9, AC12–AC13).
@@ -255,5 +281,6 @@ Per-day desired state with coalescing (replacing D1); shared rate limiter for mu
 
 ### Changelog
 - v1: initial spec.
-- v2: decisions taken while defining the core test scenarios (`docs/TEST-SCENARIOS.md`): `accommodationId` pattern (it goes into the portal URL path), maximum price of 1,000,000, and for a 429 a +500 ms margin after `Retry-After` with a 60 s fallback when the header is missing.
+- v2: decisions taken while defining the core test scenarios (`docs/scenarios/core.md`): `accommodationId` pattern (it goes into the portal URL path), maximum price of 1,000,000, and for a 429 a +500 ms margin after `Retry-After` with a 60 s fallback when the header is missing.
 - v3: changes from the `feature/core` review. Only `400`/`404` are permanent; any other undocumented status is retried as `unexpected_status`, with an alert, so it cannot drop an accepted update. `Retry-After` is capped at 10 min. The known `sync-status` limitation is documented.
+- v4: §3 adds the source layout (tests in their own `test/` tree mirroring `src/`, `domain/` split into `calendar/`, `updates/` and `retry/`), decided before the API block. §12 adds the `refactor/<name>` branch prefix for structural changes without behaviour change.
