@@ -12,9 +12,35 @@ export type AcceptedUpdate = { readonly updateId: number; readonly chunks: numbe
 
 /** Stores an update and its ≤ 31-day tasks in one transaction (D2). */
 export async function acceptUpdate(
-  _pool: pg.Pool,
-  _request: UpdateRequest,
-  _chunks: readonly DateRange[],
+  pool: pg.Pool,
+  request: UpdateRequest,
+  chunks: readonly DateRange[],
 ): Promise<AcceptedUpdate> {
-  throw new Error('not implemented');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Taken before any id is allocated, so ids for one accommodation follow commit order (D1).
+    await client.query(ACCOMMODATION_LOCK_SQL, [request.accommodationId]);
+    const { rows } = await client.query<{ id: number }>(
+      `INSERT INTO updates (accommodation_id, date_from, date_to, available, price_per_night)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [request.accommodationId, request.from, request.to, request.available, request.pricePerNight],
+    );
+    const updateId = rows[0]!.id;
+    // One insert per chunk, in order: at most 12 for a 366-day update.
+    for (const [index, chunk] of chunks.entries()) {
+      await client.query(
+        `INSERT INTO sync_tasks (update_id, accommodation_id, chunk_index, date_from, date_to)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [updateId, request.accommodationId, index, chunk.from, chunk.to],
+      );
+    }
+    await client.query('COMMIT');
+    return { updateId, chunks: chunks.length };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
