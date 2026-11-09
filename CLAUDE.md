@@ -78,7 +78,7 @@ The agent is required to find at least 3 risks, so not every risk is a real prob
 
 - **`SPEC.md` ⇄ `docs/SPEC.es.md` are mirrors.** Every change to one is applied to the other in the same commit, and both changelogs get the new version entry.
 - If implementation forces a design change, update the spec (bump its version, explain why) and do not let the code drift silently.
-- Keep notes for `PROCESS.md` as we go: what the AI did, what was corrected, and how we noticed.
+- **`docs/PROCESS-LOG.md`** records, as it happens, what the AI did, what was corrected or discarded, and how we noticed, with commit hashes. Add the entries **in the same PR** as the work they describe. `PROCESS.md` (half a page) is distilled from it at the end.
 
 ## Portal Sol facts (measured 2026-11-09, `base` variant)
 
