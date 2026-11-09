@@ -1,5 +1,9 @@
 import { defineConfig } from 'vitest/config';
 
+// Run tests in a time zone with DST so that date logic that accidentally depends on local time
+// fails (scenario D8). Workers inherit this from the main process.
+process.env.TZ = 'Europe/Madrid';
+
 export default defineConfig({
   test: {
     projects: [
