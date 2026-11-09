@@ -1,0 +1,52 @@
+# Portal Sol: the fictional external portal your service must sync with.
+# Plus the database for your service: pick ONE profile.
+#
+#   docker compose --profile postgres up -d   →  Portal Sol + PostgreSQL 18  (postgres://sync:sync@localhost:5432/sync)
+#   docker compose --profile mongo up -d      →  Portal Sol + MongoDB 8      (mongodb://localhost:27017/sync)
+#
+# Portal Sol answers on http://localhost:4000 (see API.md).
+services:
+  portal-sol:
+    image: ghcr.io/avantio/portal-sol:latest
+    container_name: portal-sol
+    ports:
+      - "4000:4000"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:18
+    container_name: sync-postgres
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: sync
+      POSTGRES_PASSWORD: sync
+      POSTGRES_DB: sync
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sync -d sync"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:8
+    container_name: sync-mongo
+    profiles: ["mongo"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  mongo-data:
