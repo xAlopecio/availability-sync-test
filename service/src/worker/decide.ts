@@ -1,5 +1,9 @@
-import { DEFAULT_RETRY_POLICY, type RetryPolicy } from '../domain/retry/backoff.ts';
-import type { PortalCallResult, TransientReason } from '../domain/retry/outcome.ts';
+import { DEFAULT_RETRY_POLICY, nextAttemptAt, type RetryPolicy } from '../domain/retry/backoff.ts';
+import {
+  classifyOutcome,
+  type PortalCallResult,
+  type TransientReason,
+} from '../domain/retry/outcome.ts';
 
 /** What the portal client observed, including the portal's error body when there is one. */
 export type ObservedCall = PortalCallResult & {
@@ -27,7 +31,7 @@ export type AttemptAction =
     };
 
 /** Turns one portal call into the single action the worker applies (SPEC D4, §5). */
-export function decideAttempt(_args: {
+export function decideAttempt(args: {
   attempt: number;
   call: ObservedCall;
   now: number;
@@ -35,6 +39,34 @@ export function decideAttempt(_args: {
   timeoutMs: number;
   policy?: RetryPolicy;
 }): AttemptAction {
-  void DEFAULT_RETRY_POLICY;
-  throw new Error('not implemented');
+  const { attempt, call, now, random, timeoutMs, policy = DEFAULT_RETRY_POLICY } = args;
+  const outcome = classifyOutcome(call, now);
+  const httpStatus = call.kind === 'response' ? call.status : null;
+
+  if (outcome.class === 'success') {
+    return { type: 'complete', outcome: 'success', httpStatus: httpStatus! };
+  }
+  const error = describeFailure(call, timeoutMs);
+  if (outcome.class === 'permanent') {
+    return { type: 'fail', outcome: 'client_error', error, httpStatus: outcome.status };
+  }
+  const at = nextAttemptAt({ attempt, outcome, now, random, policy });
+  return {
+    type: 'reschedule',
+    outcome: outcome.label,
+    at,
+    error,
+    httpStatus,
+    ...(outcome.label === 'rate_limited' ? { pauseForMs: at - now } : {}),
+    logLevel: outcome.label === 'unauthorized' ? 'error' : 'warn',
+  };
+}
+
+/** SPEC §5 formats: "<status> <CODE>: <message>", "timeout after <ms> ms", "network error <code>". */
+function describeFailure(call: ObservedCall, timeoutMs: number): string {
+  if (call.kind === 'timeout') return `timeout after ${timeoutMs} ms`;
+  if (call.kind === 'network_error') return `network error ${call.code ?? 'unknown'}`;
+  const { code, message } = call.portalError ?? { code: null, message: null };
+  if (code === null) return String(call.status);
+  return message === null ? `${call.status} ${code}` : `${call.status} ${code}: ${message}`;
 }
