@@ -73,8 +73,9 @@ The agent is required to find at least 3 risks, so not every risk is a real prob
 
 ## Git workflow
 
-- Branches: `master` (stable, receives `develop` only at phase close, via PR and with a tag) ← `develop` ← `feature/<name>` or `docs/<name>`. **Never commit to `master` or `develop` directly.**
-- Planned branches: `feature/setup`, `feature/core`, `feature/api`, `feature/worker`, `feature/metrics`, `feature/e2e`, `docs/process`.
+- Branches: `master` (stable, receives `develop` only at phase close, via PR and with a tag) ← `develop` ← a block branch. **Never commit to `master` or `develop` directly.**
+- Block branch prefixes: `feature/<name>` (new behaviour), `refactor/<name>` (structural change with no behaviour change), `docs/<name>` (documentation only).
+- Branches so far and planned: `feature/setup`, `feature/core`, `refactor/structure`, `feature/api`, `feature/worker`, `feature/metrics`, `feature/e2e`, `docs/process`.
 - **Merged branches are never deleted** (locally or on GitHub): they are part of the visible process.
 - Small Conventional Commits (`feat:`, `test:`, `fix:`, `refactor:`, `docs:`, `chore:`), with a scope when useful (`feat(worker): …`). In TDD, the failing test and its implementation may be separate commits.
 - Integrate through GitHub PRs into `develop` (`gh pr create --base develop`). CI (`.github/workflows/ci.yml`) runs `npm run check` on every PR and must be green. The user reviews and merges.

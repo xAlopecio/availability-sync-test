@@ -265,7 +265,10 @@ Per-day desired state with coalescing (replacing D1); shared rate limiter for mu
 - **Branching.**
   - `master` is the stable branch and only receives `develop` when a phase is closed, via PR and with a version tag.
   - `develop` is the integration branch.
-  - Each block of work goes on its own `feature/<name>` (or `docs/<name>`) branch cut from `develop`, and is merged back through a **GitHub PR**.
+  - Each block of work goes on its own branch cut from `develop`, and is merged back through a **GitHub PR**. The prefix says what kind of block it is:
+    - `feature/<name>`: new behaviour.
+    - `refactor/<name>`: structural change with no behaviour change (e.g. `refactor/structure`).
+    - `docs/<name>`: documentation only.
   - Nothing is committed directly to `master` or `develop`.
 - **TDD for `domain/` and the limiter:** write the scenarios from §9 as failing tests, implement, then refactor.
 - **Integration tests** for the behaviours that only the real portal can prove (AC4–AC9, AC12–AC13).
@@ -280,4 +283,4 @@ Per-day desired state with coalescing (replacing D1); shared rate limiter for mu
 - v1: initial spec.
 - v2: decisions taken while defining the core test scenarios (`docs/scenarios/core.md`): `accommodationId` pattern (it goes into the portal URL path), maximum price of 1,000,000, and for a 429 a +500 ms margin after `Retry-After` with a 60 s fallback when the header is missing.
 - v3: changes from the `feature/core` review. Only `400`/`404` are permanent; any other undocumented status is retried as `unexpected_status`, with an alert, so it cannot drop an accepted update. `Retry-After` is capped at 10 min. The known `sync-status` limitation is documented.
-- v4: §3 adds the source layout (tests in their own `test/` tree mirroring `src/`, `domain/` split into `calendar/`, `updates/` and `retry/`), decided before the API block.
+- v4: §3 adds the source layout (tests in their own `test/` tree mirroring `src/`, `domain/` split into `calendar/`, `updates/` and `retry/`), decided before the API block. §12 adds the `refactor/<name>` branch prefix for structural changes without behaviour change.
