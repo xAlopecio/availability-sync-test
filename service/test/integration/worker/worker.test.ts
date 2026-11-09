@@ -1,0 +1,406 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { PortalClient } from '#src/portal/client.ts';
+import { SlidingWindowRateLimiter } from '#src/portal/rate-limiter.ts';
+import type { ObservedCall } from '#src/worker/decide.ts';
+import type { Worker } from '#src/worker/worker.ts';
+import { useMigratedDatabase } from '../../support/migrated-db.ts';
+import { portalDay, portalDays, portalRequests, resetPortal } from '../../support/portal.ts';
+import {
+  acceptAll,
+  allSettled,
+  captureLog,
+  expectedDays,
+  testWorker,
+  waitUntil,
+  type Change,
+} from '../../support/worker-harness.ts';
+
+const db = useMigratedDatabase();
+let running: Worker[] = [];
+const track = <T extends { worker: Worker }>(h: T) => {
+  running.push(h.worker);
+  return h;
+};
+beforeEach(async () => {
+  await resetPortal();
+});
+afterEach(async () => {
+  await Promise.all(running.map((w) => w.stop()));
+  running = [];
+});
+
+const statuses = async () =>
+  (
+    await db
+      .pool()
+      .query('SELECT status, count(*)::int AS n FROM sync_tasks GROUP BY status ORDER BY status')
+  ).rows;
+const assertPortalMatches = async (changes: Change[], accommodationId: string) => {
+  const expected = expectedDays(changes, accommodationId);
+  const dates = [...expected.keys()].sort();
+  const actual = await portalDays(accommodationId, dates[0]!, dates.at(-1)!);
+  for (const day of actual) {
+    if (expected.has(day.date)) {
+      expect({
+        date: day.date,
+        available: day.available,
+        pricePerNight: day.pricePerNight,
+      }).toEqual({
+        date: day.date,
+        ...expected.get(day.date),
+      });
+    }
+  }
+  expect(actual.filter((d) => expected.has(d.date))).toHaveLength(expected.size);
+};
+
+describe('worker against the real Portal Sol', () => {
+  it('L1 / AC4 + L2 / AC5: overlapping updates end correct per day; successful PUTs in acceptance order, never overlapping', async () => {
+    const changes: Change[] = [
+      {
+        accommodationId: 'acc-1003',
+        from: portalDay(0),
+        to: portalDay(89),
+        available: true,
+        pricePerNight: 100,
+      }, // 3 chunks
+      {
+        accommodationId: 'acc-1003',
+        from: portalDay(10),
+        to: portalDay(16),
+        available: false,
+        pricePerNight: 150,
+      },
+      {
+        accommodationId: 'acc-1003',
+        from: portalDay(12),
+        to: portalDay(13),
+        available: true,
+        pricePerNight: 170,
+      },
+    ];
+    await acceptAll(db.pool(), changes);
+    const taskOrder = (
+      await db.pool().query('SELECT date_from, date_to FROM sync_tasks ORDER BY id')
+    ).rows;
+    const { worker } = track(testWorker(db.pool()));
+    worker.start();
+    await waitUntil(allSettled(db.pool()), 150_000, 'all tasks settled');
+    expect(await statuses()).toEqual([{ status: 'done', n: 5 }]);
+
+    // AC4: every day equals the last accepted update covering it.
+    await assertPortalMatches(changes, 'acc-1003');
+
+    // AC5: the successful PUTs arrived in acceptance (task id) order…
+    const puts = (await portalRequests()).filter(
+      (r) => r.method === 'PUT' && r.path.includes('/acc-1003/'),
+    );
+    const ok = puts
+      .filter((r) => r.status === 200)
+      .map((r) => ({ date_from: r.body!['from'], date_to: r.body!['to'] }));
+    expect(ok).toEqual(taskOrder);
+    // …and no two PUTs for the accommodation overlapped in time.
+    for (let i = 1; i < puts.length; i++) {
+      const prevEnd = Date.parse(puts[i - 1]!.timestamp) + (puts[i - 1]!.durationMs ?? 0);
+      expect(Date.parse(puts[i]!.timestamp)).toBeGreaterThanOrEqual(prevEnd - 5); // 5 ms clock slack
+    }
+  });
+
+  it('L3 / AC6: with the default limit (25/min) the portal never answers 429', async () => {
+    const changes: Change[] = Array.from({ length: 30 }, (_, i) => ({
+      accommodationId: `acc-100${(i % 5) + 1}`,
+      from: portalDay(i),
+      to: portalDay(i),
+      available: i % 2 === 0,
+      pricePerNight: 100 + i,
+    }));
+    await acceptAll(db.pool(), changes);
+    const { worker } = track(testWorker(db.pool()));
+    worker.start();
+    await waitUntil(allSettled(db.pool()), 240_000, 'all tasks settled');
+    const answered = await portalRequests();
+    expect(answered.filter((r) => r.status === 429)).toEqual([]);
+    expect(await statuses()).toEqual([{ status: 'done', n: 30 }]);
+  });
+
+  it('L4 / AC6: above the portal limit, 429s happen and nothing is sent before Retry-After elapses', async () => {
+    const changes: Change[] = Array.from({ length: 36 }, (_, i) => ({
+      accommodationId: `acc-100${(i % 6) + 1}`,
+      from: portalDay(i),
+      to: portalDay(i),
+      available: true,
+      pricePerNight: 200 + i,
+    }));
+    await acceptAll(db.pool(), changes);
+    const { worker, records } = track(testWorker(db.pool(), { maxRequestsPerMinute: 60 }));
+    worker.start();
+    await waitUntil(allSettled(db.pool()), 300_000, 'all tasks settled');
+
+    const limited = records.filter((r) => r.action.outcome === 'rate_limited');
+    expect(limited.length).toBeGreaterThan(0); // the scenario really provoked the portal
+    for (const r of limited) {
+      const retryAfterMs = Number((r.call as { retryAfter?: string }).retryAfter) * 1000;
+      const sentTooEarly = records.filter(
+        (o) => o.startedAt > r.endedAt && o.startedAt < r.endedAt + retryAfterMs,
+      );
+      expect(sentTooEarly.map((o) => o.startedAt - r.endedAt)).toEqual([]);
+    }
+    expect(await statuses()).toEqual([{ status: 'done', n: 36 }]);
+  });
+
+  it('L5 / AC7: a worker stopped mid-way and a crashed lease are both completed by a new worker', async () => {
+    const changes: Change[] = [
+      ...Array.from({ length: 4 }, (_, i) => ({
+        accommodationId: 'acc-1001',
+        from: portalDay(i * 3),
+        to: portalDay(i * 3 + 5),
+        available: i % 2 === 0,
+        pricePerNight: 110 + i,
+      })),
+      ...Array.from({ length: 4 }, (_, i) => ({
+        accommodationId: 'acc-1002',
+        from: portalDay(i * 3),
+        to: portalDay(i * 3 + 5),
+        available: i % 2 === 1,
+        pricePerNight: 120 + i,
+      })),
+    ];
+    await acceptAll(db.pool(), changes);
+    const first = testWorker(db.pool(), { concurrency: 1 });
+    first.worker.start();
+    await waitUntil(
+      async () => first.records.some((r) => r.action.type === 'complete'),
+      60_000,
+      'one completed attempt',
+    );
+    await first.worker.stop();
+
+    // A worker that "crashed" holding a lease on acc-1002's head.
+    const crashed = (
+      await db.pool().query(
+        `UPDATE sync_tasks SET locked_until = now() + interval '2 seconds', attempts = attempts + 1, last_attempt_at = now()
+          WHERE id = (SELECT min(id) FROM sync_tasks WHERE status = 'pending' AND accommodation_id = 'acc-1002')
+          RETURNING id`,
+      )
+    ).rows[0].id as number;
+
+    const second = track(testWorker(db.pool()));
+    second.worker.start();
+    await waitUntil(allSettled(db.pool()), 180_000, 'all tasks settled');
+    expect(await statuses()).toEqual([{ status: 'done', n: 8 }]);
+    const row = (await db.pool().query('SELECT attempts FROM sync_tasks WHERE id = $1', [crashed]))
+      .rows[0];
+    expect(row.attempts).toBeGreaterThanOrEqual(2); // re-claimed after the lease expired
+    await assertPortalMatches(changes, 'acc-1001');
+    await assertPortalMatches(changes, 'acc-1002');
+  });
+
+  it('L6 / AC8: with a timeout near the median latency, overlapping updates still converge', async () => {
+    const changes: Change[] = Array.from({ length: 6 }, (_, i) => ({
+      accommodationId: 'acc-1004',
+      from: portalDay(i),
+      to: portalDay(i + 6),
+      available: i % 2 === 0,
+      pricePerNight: 300 + i,
+    }));
+    await acceptAll(db.pool(), changes);
+    const { worker, records } = track(testWorker(db.pool(), { timeoutMs: 400 }));
+    worker.start();
+    await waitUntil(allSettled(db.pool()), 240_000, 'all tasks settled');
+    expect(records.filter((r) => r.action.outcome === 'timeout').length).toBeGreaterThan(0); // timeouts happened
+    expect(await statuses()).toEqual([{ status: 'done', n: 6 }]);
+    await assertPortalMatches(changes, 'acc-1004');
+  });
+
+  it('L7 / AC9: an unknown accommodation fails on its 404, is never retried after it, and blocks nothing', async () => {
+    const changes: Change[] = [
+      {
+        accommodationId: 'acc-1001',
+        from: portalDay(1),
+        to: portalDay(2),
+        available: false,
+        pricePerNight: 401,
+      },
+      {
+        accommodationId: 'acc-9999',
+        from: portalDay(1),
+        to: portalDay(40),
+        available: false,
+        pricePerNight: 402,
+      }, // 2 chunks
+      {
+        accommodationId: 'acc-1002',
+        from: portalDay(1),
+        to: portalDay(2),
+        available: false,
+        pricePerNight: 403,
+      },
+      {
+        accommodationId: 'acc-9999',
+        from: portalDay(3),
+        to: portalDay(4),
+        available: true,
+        pricePerNight: 404,
+      },
+    ];
+    const [, missing1, , missing2] = await acceptAll(db.pool(), changes);
+    const { worker } = track(testWorker(db.pool()));
+    worker.start();
+    await waitUntil(allSettled(db.pool()), 120_000, 'all tasks settled');
+
+    const tasks = (
+      await db.pool().query('SELECT update_id, status, last_error FROM sync_tasks ORDER BY id')
+    ).rows;
+    for (const t of tasks.filter((t) => t.update_id === missing1 || t.update_id === missing2)) {
+      expect(t.status).toBe('failed');
+      expect(t.last_error).toMatch(/^404 NOT_FOUND/);
+    }
+    expect(tasks.filter((t) => t.status === 'done')).toHaveLength(2);
+    // No request for acc-9999 after a 404: only 503s may precede each 404.
+    const missingPuts = (await portalRequests()).filter((r) => r.path.includes('/acc-9999/'));
+    expect(missingPuts.filter((r) => r.status === 404)).toHaveLength(2); // one per failed update
+    const lastNotFound = missingPuts.map((r) => r.status).lastIndexOf(404);
+    expect(missingPuts.slice(lastNotFound + 1)).toEqual([]);
+    expect(missingPuts.every((r) => r.status === 404 || r.status === 503)).toBe(true);
+  });
+
+  it('L8 / D5: at most WORKER_CONCURRENCY attempts in flight, never two for one accommodation', async () => {
+    const changes: Change[] = Array.from({ length: 12 }, (_, i) => ({
+      accommodationId: `acc-100${(i % 6) + 1}`,
+      from: portalDay(i),
+      to: portalDay(i),
+      available: true,
+      pricePerNight: 500 + i,
+    }));
+    await acceptAll(db.pool(), changes);
+    const { worker, records } = track(testWorker(db.pool(), { concurrency: 3 }));
+    worker.start();
+    await waitUntil(allSettled(db.pool()), 120_000, 'all tasks settled');
+    for (const r of records) {
+      const overlapping = records.filter((o) => o.startedAt < r.endedAt && o.endedAt > r.startedAt);
+      expect(overlapping.length).toBeLessThanOrEqual(3);
+      expect(
+        overlapping.filter((o) => o.task.accommodationId === r.task.accommodationId),
+      ).toHaveLength(1);
+    }
+  });
+
+  it('L9: stop() aborts waiting slots promptly, lets the in-flight attempt finish and store its outcome', async () => {
+    const changes: Change[] = ['acc-1001', 'acc-1002', 'acc-1003'].map((accommodationId, i) => ({
+      accommodationId,
+      from: portalDay(i),
+      to: portalDay(i),
+      available: true,
+      pricePerNight: 600 + i,
+    }));
+    await acceptAll(db.pool(), changes);
+    // One permit per minute: one slot sends, the other two wait for the window.
+    const { worker } = testWorker(db.pool(), { concurrency: 3, maxRequestsPerMinute: 1 });
+    worker.start();
+    await waitUntil(
+      async () =>
+        Number((await db.pool().query('SELECT max(attempts) AS a FROM sync_tasks')).rows[0].a) ===
+        1,
+      10_000,
+      'the first claim',
+    );
+    const started = Date.now();
+    await worker.stop();
+    expect(Date.now() - started).toBeLessThan(6_000);
+    const rows = (
+      await db.pool().query('SELECT attempts, locked_until, status FROM sync_tasks ORDER BY id')
+    ).rows;
+    expect(rows.filter((r) => r.attempts === 1)).toHaveLength(1);
+    expect(rows.filter((r) => r.attempts === 0)).toHaveLength(2); // never claimed
+    expect(rows.every((r) => r.locked_until === null)).toBe(true); // the in-flight outcome was stored
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(
+      Number((await db.pool().query('SELECT sum(attempts) AS s FROM sync_tasks')).rows[0].s),
+    ).toBe(1); // no claim after stop
+  });
+});
+
+describe('worker with a counting client (loop mechanics)', () => {
+  const scripted = (responses: ObservedCall[]) => {
+    const calls: string[] = [];
+    const client: PortalClient = {
+      async putAvailability(accommodationId) {
+        calls.push(accommodationId);
+        return responses.shift() ?? { kind: 'response', status: 200 };
+      },
+    };
+    return { client, calls };
+  };
+
+  it('L10: an idle worker with an empty queue consumes no permits and makes no calls', async () => {
+    const { client, calls } = scripted([]);
+    const limiter = new SlidingWindowRateLimiter({ limit: 2, windowMs: 60_000 });
+    const { worker } = track(testWorker(db.pool(), { client, limiter, pollMs: 20 }));
+    worker.start();
+    await new Promise((resolve) => setTimeout(resolve, 400)); // ~20 poll cycles × 3 slots
+    await worker.stop();
+    expect(calls).toEqual([]);
+    expect(limiter.tryAcquire(performance.now()).ok).toBe(true);
+    expect(limiter.tryAcquire(performance.now()).ok).toBe(true); // the full window is still free
+  });
+
+  it('L11: every attempt is logged with the SPEC §7 fields, at the right level', async () => {
+    const { client } = scripted([
+      {
+        kind: 'response',
+        status: 503,
+        portalError: { code: 'UNAVAILABLE', message: 'retry later' },
+      },
+      { kind: 'response', status: 200 },
+      {
+        kind: 'response',
+        status: 404,
+        portalError: { code: 'NOT_FOUND', message: 'Accommodation acc-1001 not found' },
+      },
+    ]);
+    const log = captureLog();
+    await acceptAll(db.pool(), [
+      {
+        accommodationId: 'acc-1001',
+        from: portalDay(1),
+        to: portalDay(1),
+        available: true,
+        pricePerNight: 1,
+      },
+      {
+        accommodationId: 'acc-1002',
+        from: portalDay(1),
+        to: portalDay(1),
+        available: true,
+        pricePerNight: 2,
+      },
+    ]);
+    const { worker } = track(
+      testWorker(db.pool(), { client, log, concurrency: 1, random: () => 0 }),
+    );
+    worker.start();
+    await waitUntil(allSettled(db.pool()), 10_000, 'all tasks settled');
+    const attempts = log.entries.filter((e) => 'outcome' in e.obj);
+    expect(attempts.map((e) => [e.level, e.obj['outcome'], e.obj['httpStatus']])).toEqual([
+      ['warn', 'unavailable', 503],
+      ['info', 'success', 200],
+      ['error', 'client_error', 404],
+    ]);
+    for (const e of attempts) {
+      expect(Object.keys(e.obj)).toEqual(
+        expect.arrayContaining([
+          'taskId',
+          'updateId',
+          'accommodationId',
+          'attempt',
+          'outcome',
+          'httpStatus',
+          'durationMs',
+          'nextAttemptAt',
+        ]),
+      );
+    }
+    expect(attempts[0]!.obj['nextAttemptAt']).toEqual(expect.any(String));
+    expect(attempts[1]!.obj['nextAttemptAt']).toBeNull();
+  });
+});
