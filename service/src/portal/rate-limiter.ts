@@ -64,8 +64,13 @@ export class SlidingWindowRateLimiter {
     this.pauseUntil(this.#now() + ms);
   }
 
-  /** Waits until a permit is free and takes it. */
-  async acquire(): Promise<void> {
+  /** Gives back the most recent permit (a claim found nothing to send, SPEC D5). */
+  release(): void {
+    throw new Error('not implemented');
+  }
+
+  /** Waits until a permit is free and takes it; rejects with an AbortError if `signal` aborts. */
+  async acquire(_options: { signal?: AbortSignal } = {}): Promise<void> {
     for (;;) {
       const result = this.tryAcquire(this.#now());
       if (result.ok) return;

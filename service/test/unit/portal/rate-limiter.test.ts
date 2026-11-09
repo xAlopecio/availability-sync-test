@@ -173,3 +173,62 @@ describe('SlidingWindowRateLimiter.pauseFor', () => {
     expect(rl.tryAcquire(6_000)).toEqual({ ok: true });
   });
 });
+
+describe('SlidingWindowRateLimiter.release', () => {
+  it('R12: gives back the most recent permit', () => {
+    const rl = limiter(1);
+    expect(rl.tryAcquire(0).ok).toBe(true);
+    expect(rl.tryAcquire(10).ok).toBe(false);
+    rl.release();
+    expect(rl.tryAcquire(20)).toEqual({ ok: true });
+  });
+
+  it('R12: releasing with nothing taken is a no-op', () => {
+    const rl = limiter(1);
+    rl.release();
+    expect(rl.tryAcquire(0).ok).toBe(true);
+    expect(rl.tryAcquire(1).ok).toBe(false);
+  });
+
+  it('R12: an idle loop of acquire + release never fills the window', () => {
+    const rl = limiter(2);
+    for (let t = 0; t < 10_000; t += 100) {
+      expect(rl.tryAcquire(t).ok).toBe(true);
+      rl.release();
+    }
+    expect(rl.tryAcquire(10_000).ok).toBe(true);
+    expect(rl.tryAcquire(10_001).ok).toBe(true);
+  });
+});
+
+describe('SlidingWindowRateLimiter.acquire with a signal', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('R13: aborting while waiting rejects promptly with an AbortError and takes no permit', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const rl = limiter(1, 60_000);
+    rl.tryAcquire(0); // the window is full until t = 60 000
+    const controller = new AbortController();
+    const waiting = rl.acquire({ signal: controller.signal });
+    const outcome = waiting.then(
+      () => 'resolved',
+      (error: Error) => error.name,
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await outcome).toBe('AbortError');
+    // Only the original start occupies the window: one permit is free again at t = 60 000.
+    expect(rl.tryAcquire(60_000)).toEqual({ ok: true });
+  });
+
+  it('R13: an already-aborted signal rejects without waiting', async () => {
+    const rl = limiter(1);
+    await expect(rl.acquire({ signal: AbortSignal.abort() })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(rl.tryAcquire(0).ok).toBe(true); // no permit was taken
+  });
+});
