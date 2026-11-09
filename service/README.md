@@ -29,16 +29,32 @@ npm run dev        # same, restarting on file changes
 
 ## Configuration
 
-Through environment variables. Defaults suit the local `docker compose` setup.
+Through environment variables, validated at startup: every invalid variable is reported at once, and the service exits. The defaults suit the local `docker compose` setup.
 
-| Variable          | Default                                    | Purpose                           |
-| ----------------- | ------------------------------------------ | --------------------------------- |
-| `PORT`            | `3000`                                     | HTTP port of this service         |
-| `PORTAL_BASE_URL` | `http://localhost:4000`                    | Portal Sol URL _(planned)_        |
-| `PORTAL_API_KEY`  | `sol-demo-key`                             | Portal Sol API key _(planned)_    |
-| `DATABASE_URL`    | `postgres://sync:sync@localhost:5432/sync` | PostgreSQL connection _(planned)_ |
+| Variable                         | Default                                    | Purpose                                                      |
+| -------------------------------- | ------------------------------------------ | ------------------------------------------------------------ |
+| `PORT`                           | `3000`                                     | HTTP port (`0` = any free port)                              |
+| `DATABASE_URL`                   | `postgres://sync:sync@localhost:5432/sync` | PostgreSQL connection                                        |
+| `DATABASE_STARTUP_TIMEOUT_MS`    | `30000`                                    | How long startup retries an unreachable database, then exits |
+| `MAX_UPDATE_RANGE_DAYS`          | `366`                                      | Longest accepted `from`..`to` range                          |
+| `LOG_LEVEL`                      | `info`                                     | pino level (`fatal` … `trace`, `silent`)                     |
+| `PORTAL_BASE_URL`                | `http://localhost:4000`                    | Portal Sol URL _(used by the worker, next block)_            |
+| `PORTAL_API_KEY`                 | `sol-demo-key`                             | Portal Sol API key _(worker)_                                |
+| `PORTAL_MAX_REQUESTS_PER_MINUTE` | `25`                                       | Client-side rate limit _(worker)_                            |
+| `PORTAL_TIMEOUT_MS`              | `5000`                                     | Timeout per portal request _(worker)_                        |
+| `WORKER_CONCURRENCY`             | `3`                                        | Parallel sends _(worker)_                                    |
+| `TASK_LEASE_MS`                  | `30000`                                    | Lease on a claimed task; must exceed `PORTAL_TIMEOUT_MS`     |
+| `WORKER_POLL_MS`                 | `500`                                      | Idle polling interval _(worker)_                             |
+| `RETRY_BASE_MS` / `RETRY_MAX_MS` | `1000` / `300000`                          | Backoff base and cap _(worker)_                              |
 
-The full list (rate limit, timeouts, worker concurrency, retries) is in SPEC §8.
+On startup the service waits for the database, applies pending migrations, then listens. `SIGTERM` closes the HTTP server and the database pool before exiting.
+
+## API
+
+- `POST /updates`: `202 { updateId, status: "pending", chunks }` once the update is stored; `400`, `413`, `415`, `503` (database down, with `Retry-After`).
+- `GET /accommodations/:id/sync-status`: the summary and the 20 most recent updates; `404` if there are none.
+
+Every error has the shape `{ "error": { "code", "message" } }`. Details in SPEC §6.
 
 ## Project layout
 
@@ -56,7 +72,7 @@ Tests import production code as `#src/...` (Node subpath import, see `package.js
 
 ```bash
 npm test                    # unit tests: fast, no Docker needed
-npm run test:integration    # against the real Portal Sol + PostgreSQL (start them first); slow by design
+npm run test:integration    # against the real PostgreSQL (and later Portal Sol); start them first
 npm run test:e2e            # the whole service against the real portal; the slowest suite
 npm run check               # typecheck + lint + format check + unit tests (also runs in CI on every PR)
 ```
