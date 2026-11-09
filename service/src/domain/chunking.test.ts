@@ -83,6 +83,13 @@ describe('splitRange', () => {
     expect(lengths('2026-10-01', '2026-10-20', 7)).toEqual([7, 7, 6]);
   });
 
+  it.each([0, -1, 1.5, Number.NaN])(
+    'C11: rejects a maxDays that is not a positive integer (%s)',
+    (max) => {
+      expect(() => splitRange(d('2026-10-01'), d('2026-10-05'), max)).toThrow(RangeError);
+    },
+  );
+
   it('C10: throws when to is earlier than from (validation must run first)', () => {
     expect(() => splitRange(d('2026-10-02'), d('2026-10-01'))).toThrow(
       new RangeError('splitRange: to (2026-10-01) is earlier than from (2026-10-02)'),

@@ -11,6 +11,9 @@ export function splitRange(
   to: IsoDate,
   maxDays: number = PORTAL_MAX_DAYS_PER_REQUEST,
 ): DateRange[] {
+  if (!Number.isInteger(maxDays) || maxDays < 1) {
+    throw new RangeError(`splitRange: maxDays must be a positive integer, got ${maxDays}`);
+  }
   if (daysInclusive(from, to) < 1) {
     throw new RangeError(`splitRange: to (${to}) is earlier than from (${from})`);
   }

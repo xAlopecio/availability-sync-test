@@ -39,6 +39,7 @@ Dates are calendar days (`YYYY-MM-DD`, no time or zone), as in `API.md`. Arithme
 | C8 | Includes `2028-02-29` | leap day neither lost nor duplicated |
 | C9 | `maxDays = 7` (parameter, for testability) | chunks of 7 |
 | C10 | `to < from` (programming error: validation runs first) | throws |
+| C11 | `maxDays` not a positive integer (`0`, `-1`, `1.5`, `NaN`) — *added during implementation: `0` made the loop infinite* | throws `RangeError` |
 
 ## 3. Update validation — `domain/update-validation.ts` (AC2)
 
