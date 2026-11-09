@@ -16,6 +16,7 @@ describe('loadConfig', () => {
     expect(loadConfig({})).toEqual({
       port: 3000,
       databaseUrl: 'postgres://sync:sync@localhost:5432/sync',
+      databaseStartupTimeoutMs: 30000,
       logLevel: 'info',
       maxUpdateRangeDays: 366,
       portal: {
@@ -34,6 +35,7 @@ describe('loadConfig', () => {
       loadConfig({
         PORT: '8080',
         DATABASE_URL: 'postgres://u:p@db:5432/other',
+        DATABASE_STARTUP_TIMEOUT_MS: '1500',
         LOG_LEVEL: 'debug',
         MAX_UPDATE_RANGE_DAYS: '90',
         PORTAL_BASE_URL: 'https://portal.example.com',
@@ -49,6 +51,7 @@ describe('loadConfig', () => {
     ).toEqual({
       port: 8080,
       databaseUrl: 'postgres://u:p@db:5432/other',
+      databaseStartupTimeoutMs: 1500,
       logLevel: 'debug',
       maxUpdateRangeDays: 90,
       portal: {
@@ -74,6 +77,7 @@ describe('loadConfig', () => {
     ['WORKER_POLL_MS', 'fast'],
     ['MAX_UPDATE_RANGE_DAYS', '0'],
     ['PORTAL_API_KEY', ''],
+    ['DATABASE_STARTUP_TIMEOUT_MS', '0'],
   ])('K3: rejects %s=%j, naming the variable', (name, value) => {
     const problems = problemsOf({ [name]: value });
     expect(problems).toHaveLength(1);
