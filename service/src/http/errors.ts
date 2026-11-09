@@ -1,3 +1,4 @@
+import type { Socket } from 'node:net';
 import type { FastifyError, FastifyInstance } from 'fastify';
 
 /** The one error shape of the API (SPEC §6), the same as Portal Sol's. */
@@ -58,10 +59,8 @@ export function registerErrorHandling(app: FastifyInstance): void {
       return reply.code(413).send(errorBody('PAYLOAD_TOO_LARGE', 'Body is larger than 1 MB'));
     }
     if (error.statusCode === 400) {
-      // Malformed or empty JSON, rejected by Fastify's parser before reaching a route.
-      return reply
-        .code(400)
-        .send(errorBody('INVALID_BODY', `Body is not valid JSON: ${error.message}`));
+      // Body problems from our JSON parser (accurate messages) or any other Fastify 400.
+      return reply.code(400).send(errorBody('INVALID_BODY', error.message));
     }
     if (isDatabaseUnavailable(error)) {
       request.log.warn({ err: error }, 'database unavailable');
@@ -73,4 +72,23 @@ export function registerErrorHandling(app: FastifyInstance): void {
     request.log.error({ err: error }, 'unhandled error');
     return reply.code(500).send(errorBody('INTERNAL', 'Internal error'));
   });
+}
+
+/**
+ * For requests Node cannot even parse as HTTP (bad request line, header overflow): Fastify's
+ * default answers its own JSON shape. Write ours instead, then close the connection.
+ */
+export function clientErrorHandler(error: Error & { code?: string }, socket: Socket): void {
+  if (error.code === 'ECONNRESET' || !socket.writable) {
+    socket.destroy();
+    return;
+  }
+  const body = JSON.stringify(errorBody('BAD_REQUEST', 'Malformed HTTP request'));
+  socket.end(
+    'HTTP/1.1 400 Bad Request\r\n' +
+      'Content-Type: application/json; charset=utf-8\r\n' +
+      `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+      'Connection: close\r\n\r\n' +
+      body,
+  );
 }

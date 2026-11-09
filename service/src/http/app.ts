@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import type pg from 'pg';
-import { registerErrorHandling } from './errors.ts';
+import { clientErrorHandler, registerErrorHandling } from './errors.ts';
+import { registerJsonBodyParser } from './json-body.ts';
 import { registerSyncStatusRoutes } from './routes/sync-status.ts';
 import { registerUpdateRoutes } from './routes/updates.ts';
 
@@ -18,9 +19,11 @@ export function buildApp(deps: AppDependencies): FastifyInstance {
     bodyLimit: 1_048_576,
     // A request that is still running after 15 s is answered by Node with 408 (SPEC §8).
     requestTimeout: 15_000,
+    clientErrorHandler,
   });
   // Only JSON is accepted: without this, Fastify would parse text/plain bodies too (SPEC §6, 415).
   app.removeContentTypeParser('text/plain');
+  registerJsonBodyParser(app);
   registerErrorHandling(app);
   registerUpdateRoutes(app, deps);
   registerSyncStatusRoutes(app, deps);
