@@ -212,4 +212,60 @@ describe('completeTask / rescheduleTask / failTask', () => {
     expect((await task(current.taskId)).status).toBe('pending');
     expect(await completeTask(db.pool(), current, { httpStatus: 200 })).toBe(true);
   });
+
+  it('Q12 / D9: a reschedule after a timeout records last_timeout_at; other outcomes do not', async () => {
+    await accept({ accommodationId: 'acc-1001' });
+    await accept({ accommodationId: 'acc-1002' });
+    const a = (await claim())!;
+    const b = (await claim())!;
+    await rescheduleTask(db.pool(), a, {
+      at: Date.now() + 60_000,
+      error: 'timeout after 400 ms',
+      httpStatus: null,
+      timedOut: true,
+    });
+    await rescheduleTask(db.pool(), b, {
+      at: Date.now() + 60_000,
+      error: '503 UNAVAILABLE',
+      httpStatus: 503,
+    });
+    const timedOut = await task(a.taskId);
+    expect(Math.abs((timedOut.last_timeout_at as Date).getTime() - Date.now())).toBeLessThan(5_000);
+    expect((await task(b.taskId)).last_timeout_at).toBeNull();
+  });
+
+  it("Q13 / D9: completing a task that timed out holds its accommodation's next tasks for the settle window only", async () => {
+    const timedOutUpdate = await accept({ accommodationId: 'acc-1001' });
+    const held = await accept({ accommodationId: 'acc-1001' });
+    const other = await accept({ accommodationId: 'acc-1002' });
+    const first = (await claim())!;
+    expect(first.updateId).toBe(timedOutUpdate);
+    await rescheduleTask(db.pool(), first, {
+      at: Date.now() - 1,
+      error: 'timeout after 400 ms',
+      httpStatus: null,
+      timedOut: true,
+    });
+    const retry = (await claim())!;
+    expect(retry.taskId).toBe(first.taskId);
+    expect(await completeTask(db.pool(), retry, { httpStatus: 200, settleMs: 60_000 })).toBe(true);
+
+    const heldRow = (
+      await db.pool().query('SELECT next_attempt_at FROM sync_tasks WHERE update_id = $1', [held])
+    ).rows[0];
+    const timeoutAt = (await task(first.taskId)).last_timeout_at as Date;
+    expect((heldRow.next_attempt_at as Date).getTime()).toBeGreaterThanOrEqual(
+      timeoutAt.getTime() + 60_000 - 5,
+    );
+    expect((await claim())?.updateId).toBe(other); // the other accommodation is not held
+    expect(await claim()).toBeNull(); // acc-1001's next update waits for the settle window
+  });
+
+  it('Q13 / D9: completing a task without a timeout delays nothing', async () => {
+    await accept({ accommodationId: 'acc-1001' });
+    const next = await accept({ accommodationId: 'acc-1001' });
+    const first = (await claim())!;
+    expect(await completeTask(db.pool(), first, { httpStatus: 200, settleMs: 60_000 })).toBe(true);
+    expect((await claim())?.updateId).toBe(next);
+  });
 });

@@ -35,6 +35,8 @@ export type WorkerOptions = {
   readonly leaseMs: number;
   readonly pollMs: number;
   readonly timeoutMs: number;
+  /** D9: after a timeout, how long the accommodation's next tasks wait once it completes. */
+  readonly timeoutSettleMs?: number;
   readonly retry: RetryPolicy;
   readonly random?: () => number;
   /** Test hook: called after every attempt. */

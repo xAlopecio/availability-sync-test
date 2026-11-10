@@ -58,3 +58,24 @@ export async function portalDays(
 /** `YYYY-MM-DD` for today + `offset` days in UTC: the portal holds 90 days from its start date. */
 export const portalDay = (offset: number): string =>
   new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+
+/**
+ * Waits until the portal's request log stops growing for `quietMs`. A request that timed out on
+ * our side is still processed by the portal and only logged when it finishes; without this, one
+ * test's late requests can land in (and count against the limit of) the next test.
+ */
+export async function waitForPortalQuiet(quietMs = 2_000, maxMs = 30_000): Promise<void> {
+  const deadline = Date.now() + maxMs;
+  let last = -1;
+  let stableSince = Date.now();
+  while (Date.now() < deadline) {
+    const count = (await portalRequests()).length;
+    if (count !== last) {
+      last = count;
+      stableSince = Date.now();
+    } else if (Date.now() - stableSince >= quietMs) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}

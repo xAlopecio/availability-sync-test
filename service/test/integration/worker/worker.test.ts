@@ -4,7 +4,13 @@ import { SlidingWindowRateLimiter } from '#src/portal/rate-limiter.ts';
 import type { ObservedCall } from '#src/worker/decide.ts';
 import type { Worker } from '#src/worker/worker.ts';
 import { useMigratedDatabase } from '../../support/migrated-db.ts';
-import { portalDay, portalDays, portalRequests, resetPortal } from '../../support/portal.ts';
+import {
+  portalDay,
+  portalDays,
+  portalRequests,
+  resetPortal,
+  waitForPortalQuiet,
+} from '../../support/portal.ts';
 import {
   acceptAll,
   allSettled,
@@ -27,6 +33,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await Promise.all(running.map((w) => w.stop()));
   running = [];
+  await waitForPortalQuiet(); // late requests of this test must not leak into the next one
 });
 
 const statuses = async () =>
@@ -220,7 +227,10 @@ describe('worker against the real Portal Sol', () => {
       pricePerNight: 300 + i,
     }));
     await acceptAll(db.pool(), changes);
-    const { worker, records } = track(testWorker(db.pool(), { timeoutMs: 400 }));
+    // A short settle window (D9) keeps the test fast; production uses 30 s.
+    const { worker, records } = track(
+      testWorker(db.pool(), { timeoutMs: 400, timeoutSettleMs: 3_000 }),
+    );
     worker.start();
     await waitUntil(allSettled(db.pool()), 240_000, 'all tasks settled');
     expect(records.filter((r) => r.action.outcome === 'timeout').length).toBeGreaterThan(0); // timeouts happened

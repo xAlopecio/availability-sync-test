@@ -70,7 +70,7 @@ const OWNED = `id = $1 AND attempts = $2 AND status = 'pending'`;
 export async function completeTask(
   pool: pg.Pool,
   task: ClaimedTask,
-  result: { httpStatus: number },
+  result: { httpStatus: number; settleMs?: number },
 ): Promise<boolean> {
   const { rowCount } = await pool.query(
     `UPDATE sync_tasks
@@ -86,7 +86,7 @@ export async function completeTask(
 export async function rescheduleTask(
   pool: pg.Pool,
   task: ClaimedTask,
-  result: { at: number; error: string; httpStatus: number | null },
+  result: { at: number; error: string; httpStatus: number | null; timedOut?: boolean },
 ): Promise<boolean> {
   const { rowCount } = await pool.query(
     `UPDATE sync_tasks
