@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { createMetrics, OUTCOMES } from '#src/metrics/registry.ts';
-import { parseExposition } from '../../support/exposition.ts';
+import { createMetrics, OUTCOMES, REJECTION_CODES, RETRY_REASONS } from '#src/metrics/registry.ts';
+import { parseExposition, type Sample } from '../../support/exposition.ts';
 
 const expose = async () => parseExposition(await createMetrics().registry.metrics());
 
@@ -23,6 +23,7 @@ describe('createMetrics', () => {
       portal_rate_limiter_paused_seconds: 'gauge',
       portal_rate_limiter_window_starts: 'gauge',
       sync_worker_active: 'gauge',
+      sync_stale_results_total: 'counter',
     });
   });
 
@@ -65,6 +66,34 @@ describe('createMetrics', () => {
     const { types } = await expose();
     expect(types.has('process_cpu_user_seconds_total')).toBe(true);
     expect([...types.keys()].some((name) => name.startsWith('nodejs_'))).toBe(true);
+  });
+});
+
+describe('initialised label values', () => {
+  const series = (samples: Sample[], name: string, label: string) =>
+    samples.filter((x) => x.name === name).map((x) => [x.labels[label], x.value]);
+
+  it('M5: every documented label value exists at 0 on a fresh registry (no unborn series)', async () => {
+    const { samples } = await expose();
+    const zeros = (values: readonly string[]) => values.map((v) => [v, 0]);
+    expect(series(samples, 'portal_requests_total', 'outcome')).toEqual(zeros(OUTCOMES));
+    expect(series(samples, 'portal_request_duration_seconds_count', 'outcome')).toEqual(
+      zeros(OUTCOMES),
+    );
+    expect(series(samples, 'sync_retries_total', 'reason')).toEqual(zeros(RETRY_REASONS));
+    expect(series(samples, 'sync_tasks_finished_total', 'result')).toEqual(
+      zeros(['done', 'failed']),
+    );
+    expect(series(samples, 'updates_rejected_total', 'code')).toEqual(zeros(REJECTION_CODES));
+  });
+
+  it('M5: rejection codes are typed like the outcomes', () => {
+    const m = createMetrics();
+    for (const code of REJECTION_CODES) expect(() => m.recordRejection(code)).not.toThrow();
+    if (Math.random() > 2) {
+      // @ts-expect-error 'WHATEVER' is not a documented rejection code
+      m.recordRejection('WHATEVER');
+    }
   });
 });
 

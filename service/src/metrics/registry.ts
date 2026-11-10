@@ -14,6 +14,21 @@ export const OUTCOMES = [
 ] as const;
 export type OutcomeLabel = (typeof OUTCOMES)[number];
 export type RetryReason = Exclude<OutcomeLabel, 'success' | 'client_error'>;
+export const RETRY_REASONS = OUTCOMES.filter(
+  (o): o is RetryReason => o !== 'success' && o !== 'client_error',
+);
+/** Every code POST /updates can answer without accepting (SPEC §6). */
+export const REJECTION_CODES = [
+  'INVALID_BODY',
+  'INVALID_DATE',
+  'RANGE_TOO_LARGE',
+  'INVALID_HEADER',
+  'IDEMPOTENCY_KEY_REUSED',
+  'UNSUPPORTED_MEDIA_TYPE',
+  'PAYLOAD_TOO_LARGE',
+  'UNAVAILABLE',
+] as const;
+export type RejectionCode = (typeof REJECTION_CODES)[number];
 
 /** Every instrument the service updates; one set per app instance (own registry). */
 export type Metrics = {
@@ -33,6 +48,8 @@ export type Metrics = {
    * outcomes are enforced here, at compile time. */
   readonly recordPortalCall: (outcome: OutcomeLabel, durationSeconds: number) => void;
   readonly recordRetry: (reason: RetryReason) => void;
+  readonly recordRejection: (code: RejectionCode) => void;
+  readonly staleResults: Counter;
 };
 
 /**
@@ -116,5 +133,11 @@ export function createMetrics(): Metrics {
       instruments.portalRequestDuration.observe({ outcome }, durationSeconds);
     },
     recordRetry: (reason) => instruments.retries.inc({ reason }),
+    recordRejection: (code) => instruments.updatesRejected.inc({ code }),
+    staleResults: new Counter({
+      name: 'sync_stale_results_total',
+      help: 'Attempt results discarded because the lease had been lost (fencing).',
+      registers,
+    }),
   };
 }

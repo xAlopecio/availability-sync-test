@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createPool } from '#src/db/pool.ts';
 import { buildApp } from '#src/http/app.ts';
 import { createMetrics, type Metrics } from '#src/metrics/registry.ts';
 import type { PortalClient } from '#src/portal/client.ts';
@@ -10,6 +11,7 @@ import { portalDay } from '../../support/portal.ts';
 import {
   acceptAll,
   allSettled,
+  captureLog,
   testWorker,
   waitUntil,
   type Change,
@@ -170,6 +172,62 @@ describe('worker instrumentation', () => {
   });
 });
 
+describe('instrumentation edge cases', () => {
+  it('W9: a stale result (lease lost while in flight) is counted, and not as a retry or a finished task', async () => {
+    await acceptAll(db.pool(), [oneDay('acc-1001', 1)]);
+    const m = createMetrics();
+    let raced = false;
+    const client: PortalClient = {
+      async putAvailability() {
+        if (!raced) {
+          raced = true;
+          // Another worker re-claimed the task meanwhile: our fencing token is now stale.
+          await db.pool().query('UPDATE sync_tasks SET attempts = attempts + 1');
+        }
+        return { kind: 'response', status: 200 };
+      },
+    };
+    const { worker } = testWorker(db.pool(), { client, metrics: m, concurrency: 1, leaseMs: 500 });
+    worker.start();
+    await waitUntil(
+      async () => valueOf(await samplesOf(m), 'sync_stale_results_total') === 1,
+      10_000,
+      'a stale result',
+    );
+    await worker.stop();
+    const s = await samplesOf(m);
+    expect(valueOf(s, 'sync_tasks_finished_total', { result: 'done' })).toBeLessThanOrEqual(1); // the re-claim may finish it
+    expect(valueOf(s, 'sync_retries_total')).toBe(0);
+  });
+
+  it('W10: if the lag lookup fails after a completion, the attempt is still logged as a success', async () => {
+    await acceptAll(db.pool(), [oneDay('acc-1001', 1)]);
+    const m = createMetrics();
+    const log = captureLog();
+    const client: PortalClient = {
+      async putAvailability() {
+        // The completion only touches sync_tasks; the lag lookup joins updates, so this breaks it.
+        await db.pool().query('ALTER TABLE updates RENAME TO updates_hidden');
+        return { kind: 'response', status: 200 };
+      },
+    };
+    const { worker } = testWorker(db.pool(), { client, metrics: m, log, concurrency: 1 });
+    try {
+      worker.start();
+      await waitUntil(
+        async () => log.entries.some((e) => /succeeded|unexpected/.test(e.msg)),
+        10_000,
+        'an attempt log',
+      );
+      await worker.stop();
+    } finally {
+      await db.pool().query('ALTER TABLE IF EXISTS updates_hidden RENAME TO updates');
+    }
+    expect(log.entries.some((e) => e.msg === 'portal attempt succeeded')).toBe(true);
+    expect(log.entries.some((e) => /unexpected error in a worker slot/.test(e.msg))).toBe(false);
+  });
+});
+
 describe('API and gauges instrumentation', () => {
   const post = (
     app: ReturnType<typeof buildApp>,
@@ -230,6 +288,21 @@ describe('API and gauges instrumentation', () => {
       expect(valueOf(s, 'sync_worker_active')).toBe(0);
     } finally {
       await app.close();
+    }
+  });
+
+  it('W11: POST /updates with the database down counts an UNAVAILABLE rejection', async () => {
+    const m = createMetrics();
+    const pool = createPool('postgres://sync:sync@127.0.0.1:1/nowhere', { max: 1 });
+    const dead = buildApp({ pool, maxUpdateRangeDays: 366, logger: false, metrics: m });
+    try {
+      expect((await post(dead, readme)).statusCode).toBe(503);
+      expect(valueOf(await samplesOf(m), 'updates_rejected_total', { code: 'UNAVAILABLE' })).toBe(
+        1,
+      );
+    } finally {
+      await dead.close();
+      await pool.end();
     }
   });
 });
