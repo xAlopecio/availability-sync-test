@@ -565,4 +565,77 @@ describe('worker with a counting client (loop mechanics)', () => {
       (row.next_attempt_at as Date).getTime() - (row.db_now as Date).getTime(),
     ).toBeGreaterThan(3_000);
   });
+
+  it('WK1: two workers on one database: only one sends; when it stops, the standby takes over', async () => {
+    const a = scripted([]);
+    const b = scripted([]);
+    const changes = (offset: number) =>
+      Array.from({ length: 8 }, (_, i) => ({
+        accommodationId: `acc-10${String(i + 1).padStart(2, '0')}`,
+        from: portalDay(offset + i),
+        to: portalDay(offset + i),
+        available: true,
+        pricePerNight: 10 + i,
+      }));
+    // Both start before any work exists, so they really compete for it.
+    const first = track(
+      testWorker(db.pool(), { client: a.client, leaderRetryMs: 200, pollMs: 20 }),
+    );
+    const second = track(
+      testWorker(db.pool(), { client: b.client, leaderRetryMs: 200, pollMs: 20 }),
+    );
+    first.worker.start();
+    second.worker.start();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await acceptAll(db.pool(), changes(0));
+    await waitUntil(allSettled(db.pool()), 15_000, 'first batch settled');
+    expect([a.calls.length, b.calls.length].sort((x, y) => x - y)).toEqual([0, 8]); // only the lock holder sent
+
+    const [active, standby] = a.calls.length > 0 ? [first, b] : [second, a];
+    await active.worker.stop();
+    await acceptAll(db.pool(), changes(20));
+    await waitUntil(allSettled(db.pool()), 15_000, 'second batch settled by the standby');
+    expect(standby.calls).toHaveLength(8);
+  });
+
+  it('WK2: a worker started right after another process used the window waits for those starts to age out', async () => {
+    // The previous process sent 3 requests 57 s ago (their last_attempt_at is in the database).
+    await acceptAll(
+      db.pool(),
+      [1, 2, 3].map((i) => ({
+        accommodationId: 'acc-1001',
+        from: portalDay(i),
+        to: portalDay(i),
+        available: true,
+        pricePerNight: i,
+      })),
+    );
+    await db
+      .pool()
+      .query(
+        "UPDATE sync_tasks SET status = 'done', attempts = 1, last_attempt_at = now() - interval '57 seconds'",
+      );
+    await acceptAll(db.pool(), [
+      {
+        accommodationId: 'acc-1002',
+        from: portalDay(1),
+        to: portalDay(1),
+        available: true,
+        pricePerNight: 9,
+      },
+    ]);
+    const sentAt: number[] = [];
+    const client: PortalClient = {
+      async putAvailability() {
+        sentAt.push(Date.now());
+        return { kind: 'response', status: 200 };
+      },
+    };
+    const limiter = new SlidingWindowRateLimiter({ limit: 3, windowMs: 60_000 });
+    const started = Date.now();
+    const { worker } = track(testWorker(db.pool(), { client, limiter }));
+    worker.start();
+    await waitUntil(allSettled(db.pool()), 15_000, 'the new update settled');
+    expect(sentAt[0]! - started).toBeGreaterThan(2_000); // ~3 s: the seeded starts left the window
+  });
 });

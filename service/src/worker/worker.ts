@@ -40,6 +40,8 @@ export type WorkerOptions = {
   readonly timeoutSettleMs?: number;
   readonly retry: RetryPolicy;
   readonly random?: () => number;
+  /** Standby instances retry the single-worker lock this often (SPEC D5). Default 5 s. */
+  readonly leaderRetryMs?: number;
   /** Test hook: called right after a task is claimed, before it is sent. */
   readonly onClaimed?: (task: ClaimedTask) => void;
   /** Test hook: called after every attempt. */
