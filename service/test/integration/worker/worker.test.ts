@@ -119,7 +119,23 @@ describe('worker against the real Portal Sol', () => {
     worker.start();
     await waitUntil(allSettled(db.pool()), 240_000, 'all tasks settled');
     const answered = await portalRequests();
-    expect(answered.filter((r) => r.status === 429)).toEqual([]);
+    // On failure, show what the portal had received in the 60 s before each 429.
+    const diagnostics = answered
+      .filter((r) => r.status === 429)
+      .map((r) => {
+        const at = Date.parse(r.timestamp);
+        const window = answered.filter(
+          (o) => Date.parse(o.timestamp) > at - 60_000 && Date.parse(o.timestamp) < at,
+        );
+        return {
+          id: r.id,
+          at: r.timestamp,
+          requestsInPrevious60s: window.length,
+          firstOfRun: answered[0]?.timestamp,
+          statusesInWindow: window.map((o) => o.status).join(','),
+        };
+      });
+    expect(diagnostics).toEqual([]);
     expect(await statuses()).toEqual([{ status: 'done', n: 30 }]);
   });
 
@@ -261,7 +277,17 @@ describe('worker against the real Portal Sol', () => {
     expect(missingPuts.filter((r) => r.status === 404)).toHaveLength(2); // one per failed update
     const lastNotFound = missingPuts.map((r) => r.status).lastIndexOf(404);
     expect(missingPuts.slice(lastNotFound + 1)).toEqual([]);
-    expect(missingPuts.every((r) => r.status === 404 || r.status === 503)).toBe(true);
+    expect(
+      missingPuts
+        .filter((r) => r.status !== 404 && r.status !== 503)
+        .map((r) => ({
+          id: r.id,
+          at: r.timestamp,
+          status: r.status,
+          clientDisconnected: r.clientDisconnected,
+          durationMs: r.durationMs,
+        })),
+    ).toEqual([]);
   });
 
   it('L8 / D5: at most WORKER_CONCURRENCY attempts in flight, never two for one accommodation', async () => {
@@ -276,12 +302,24 @@ describe('worker against the real Portal Sol', () => {
     const { worker, records } = track(testWorker(db.pool(), { concurrency: 3 }));
     worker.start();
     await waitUntil(allSettled(db.pool()), 120_000, 'all tasks settled');
-    for (const r of records) {
-      const overlapping = records.filter((o) => o.startedAt < r.endedAt && o.endedAt > r.startedAt);
-      expect(overlapping.length).toBeLessThanOrEqual(3);
-      expect(
-        overlapping.filter((o) => o.task.accommodationId === r.task.accommodationId),
-      ).toHaveLength(1);
+    // Maximum number of attempts in flight at the same instant (sweep over start/end points).
+    // Counting the attempts that overlap a given one would overstate it: three short attempts
+    // one after another inside a long one all overlap it without ever overlapping each other.
+    const maxInFlight = (rs: typeof records) => {
+      const events = rs.flatMap((r) => [
+        { at: r.startedAt, delta: 1 },
+        { at: r.endedAt, delta: -1 },
+      ]);
+      events.sort((x, y) => x.at - y.at || x.delta - y.delta); // an end before a start at the same ms
+      let current = 0;
+      let max = 0;
+      for (const e of events) max = Math.max(max, (current += e.delta));
+      return max;
+    };
+    expect(records.length).toBeGreaterThanOrEqual(12);
+    expect(maxInFlight(records)).toBeLessThanOrEqual(3);
+    for (const acc of new Set(records.map((r) => r.task.accommodationId))) {
+      expect(maxInFlight(records.filter((r) => r.task.accommodationId === acc))).toBe(1);
     }
   });
 
