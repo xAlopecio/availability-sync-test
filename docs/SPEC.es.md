@@ -211,37 +211,57 @@ Todos los errores, incluido el `404` de rutas desconocidas, usan el mismo format
 - Por update, sumando sus trozos: `attempts` es la suma de los intentos de los trozos, `lastError` viene del intento más reciente (`last_attempt_at`), `nextAttemptAt` es el más próximo entre los trozos pendientes, y `syncedAt` es el `completed_at` del último trozo.
 - Un alojamiento sin updates devuelve `404`, y también un `:id` que no cumple el patrón de `accommodationId` (no puede existir ningún update para él).
 
+### `GET /health` y `GET /ready`
+- `/health` (liveness): `200 { "status": "ok" }` siempre que el proceso sirva HTTP, aunque la base de datos esté caída (reiniciar no ayudaría).
+- `/ready` (readiness): `200 { "status": "ready", "database": "up", "worker": "active" | "standby" | "disabled" }`; `503` con el formato de error cuando la base de datos está caída, para que un balanceador deje de enviar updates que igualmente responderían 503.
+
 **Justificación:** el gestor necesita saber si *su* cambio ha llegado. Quien está de guardia necesita saber si algo está atascado y por qué (intentos, último error, próximo intento). Las dos cosas se responden con los datos que D2 ya guarda.
 
 ## 7. Observabilidad
 
 **Logs:** JSON con pino. Cada llamada al portal registra `taskId`, `updateId`, `accommodationId`, `attempt`, `outcome`, `httpStatus`, `durationMs` y `nextAttemptAt`. Los reintentos se registran en `warn` y los fallos permanentes en `error`.
 
-**Métricas** (`GET /metrics`, formato texto de Prometheus):
+**Métricas** (`GET /metrics`, formato texto de Prometheus, en el puerto de la API). Cada instancia de la app tiene su propio registro, y se incluyen las métricas del proceso Node (`process_*`, `nodejs_*`). No hay etiquetas por alojamiento, porque su cardinalidad no tiene límite.
 
 | Métrica | Tipo | Para qué |
 |---|---|---|
-| `sync_tasks_pending` | gauge (de la BD al hacer scrape) | Tamaño del trabajo pendiente. |
-| `sync_oldest_pending_task_age_seconds` | gauge (de la BD al hacer scrape) | ¿Hay algo atascado? |
+| `sync_tasks_pending{state}` | gauge (BD, al hacer scrape) | Trabajo pendiente **por estado**, que responde *por qué* existe: `ready` (se reclamaría ya), `in_flight` (con lease), `waiting_retry` (backoff / `Retry-After`), `held_settle` (D9), `queued` (detrás de una tarea anterior de su alojamiento). Los estados reparten las tareas pendientes sin solaparse. |
+| `sync_oldest_pending_task_age_seconds` | gauge (BD) | Antigüedad del update pendiente más viejo **desde `accepted_at`**: cuánto lleva esperando un gestor. Medirla desde el último intento la reiniciaría en cada reintento. |
+| `sync_stuck_heads{min_attempts="10"}` | gauge (BD) | Alojamientos cuya tarea en cabeza lleva ≥ 10 intentos: bloqueo en cabeza de cola (D1 + reintentos ilimitados). |
+| `sync_head_attempts_max` | gauge (BD) | El mayor número de intentos entre las cabezas. |
+| `sync_metrics_db_up` | gauge | 1 si en este scrape se pudieron leer las gauges derivadas de la BD. Con 0 esas gauges **no aparecen**, nunca un 0 falso. |
 | `portal_requests_total{outcome}` | counter | `success`, `rate_limited`, `unavailable`, `timeout`, `network_error`, `client_error`, `unauthorized`, `server_error`, `unexpected_status`. |
-| `portal_request_duration_seconds{outcome}` | histogram | Latencia del portal. |
-| `sync_retries_total{reason}` | counter | Volumen y causa de los reintentos. |
-| `sync_tasks_finished_total{result}` | counter | `done` o `failed`. |
-| `sync_update_lag_seconds` | histogram | Tiempo desde la aceptación hasta la sincronización completa (salud de extremo a extremo). |
-| `updates_accepted_total` | counter | Ritmo de entrada. |
+| `portal_request_duration_seconds{outcome}` | histogram | Latencia del portal; intervalos `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10` s. |
+| `sync_retries_total{reason}` | counter | Reintentos por resultado transitorio. |
+| `sync_tasks_finished_total{result}` | counter | `done` o `failed`. Un fallo permanente cuenta la tarea y sus hermanos fallidos (D4). |
+| `sync_update_lag_seconds` | histogram | De la aceptación al último trozo completado, una vez por update sincronizado (salud de extremo a extremo); intervalos `1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600` s. |
+| `sync_sends_deferred_total` | counter | Envíos omitidos porque la pausa global empezó entre la reclamación y el envío (D5). |
+| `updates_accepted_total` | counter | Updates aceptados (sin contar las repeticiones idempotentes). |
+| `updates_rejected_total{code}` | counter | `POST /updates` rechazados, por código de error. |
+| `portal_rate_limiter_paused_seconds` | gauge | Lo que queda de la pausa global tras un 429. |
+| `portal_rate_limiter_window_starts` | gauge | Inicios de petición en la ventana actual de 60 s. |
+| `sync_worker_active` | gauge | 1 en la instancia que tiene el lock de worker único (D5); 0 en una instancia en espera o con el worker desactivado. |
 
-**Alertas propuestas:**
+**Varias instancias:** los contadores son por proceso, así que se agregan con `sum()`. Las gauges derivadas de la BD dan el mismo valor en todas las instancias, así que se agregan con `max()`.
+
+**Alertas** (reglas de Prometheus listas para usar en `ops/alerts.yml`):
 
 | Alerta | Condición | Severidad |
 |---|---|---|
-| Sincronización atascada | `sync_oldest_pending_task_age_seconds > 600` durante 5m | crítica |
-| Worker sin enviar | `sync_tasks_pending > 0` y `rate(portal_requests_total[5m]) == 0` | crítica |
-| Credenciales incorrectas | `increase(portal_requests_total{outcome="unauthorized"}[5m]) > 0` | crítica |
+| Sincronización atascada | `max(sync_oldest_pending_task_age_seconds) > 600` durante 5m | crítica |
+| Ningún worker activo | `max(sync_worker_active) == 0` con trabajo pendiente, durante 5m | crítica |
+| Worker sin enviar | hay tareas listas y `sum(rate(portal_requests_total[5m])) == 0`, durante 5m | crítica |
+| Credenciales incorrectas | `sum(increase(portal_requests_total{outcome="unauthorized"}[5m])) > 0` | crítica |
+| Las métricas no pueden leer la BD | `min(sync_metrics_db_up) == 0` durante 2m | crítica |
+| Alojamiento atascado | `max(sync_stuck_heads) > 0` durante 15m | aviso |
 | Portal degradado | ratio de no-éxito > 50 % en 10m (la línea base ronda el 25 %) | aviso |
-| Throttling inesperado | `increase(…{outcome="rate_limited"}[10m]) > 0` (nuestro limitador debería evitarlo) | aviso |
-| Respuestas inesperadas del portal | `increase(…{outcome="unexpected_status"}[10m]) > 0` (código no documentado, que se reintenta) | aviso |
-| Fallos permanentes | `increase(sync_tasks_finished_total{result="failed"}[15m]) > 0` | aviso |
+| Throttling inesperado | algún `rate_limited` en 10m (nuestro limitador debería evitarlo) | aviso |
+| Limitador pausado mucho tiempo | `max(portal_rate_limiter_paused_seconds) > 300` | aviso |
+| Respuestas inesperadas del portal | algún `unexpected_status` en 10m (código no documentado, que se reintenta) | aviso |
+| Fallos permanentes | algún `sync_tasks_finished_total{result="failed"}` en 15m | aviso |
+| Retenciones de D9 persistentes | `max(sync_tasks_pending{state="held_settle"}) > 0` durante 10m (una retención dura 30 s; si persiste es que se repiten los timeouts) | aviso |
 | Portal lento | p95 de `portal_request_duration_seconds` > 3 s durante 10m | aviso |
+| Retraso de sincronización alto | p95 de `sync_update_lag_seconds` > 600 s durante 15m | aviso |
 
 ## 8. Configuración (variables de entorno)
 
@@ -271,7 +291,7 @@ Cada criterio corresponde al menos a un test automatizado. **U** = unitario; **I
 | AC10 | La clasificación de respuestas y el backoff siguen D4: la clase correcta para cada código, un backoff dentro de sus límites y el `Retry-After` respetado. | U |
 | AC11 | El limitador nunca permite más de N inicios en cualquier ventana de 60 s (con reloj simulado). | U |
 | AC12 | `sync-status` muestra `pending` y luego `synced`, con contadores y progreso de trozos correctos; muestra `failed` con el error en el caso de AC9; `404` para un id desconocido. | I |
-| AC13 | `/metrics` expone todas las métricas de §7, y sus valores cambian como se espera durante AC4 y AC9. | I |
+| AC13 | `/metrics` expone todas las métricas de §7. Durante una ejecución real sus valores cambian como se espera y **coinciden con la realidad**: la suma de `portal_requests_total` es igual a los PUT del log de peticiones del propio portal, y los 503 cuadran. `/health` y `/ready` se comportan como en §6. | I |
 
 Los tests de integración son lentos por naturaleza (el portal admite 30 peticiones por minuto), así que los escenarios se mantienen pequeños. Como los 503 del portal son aleatorios, los timeouts de los tests son generosos.
 
@@ -315,3 +335,4 @@ Estado deseado por día con fusión de updates (sustituyendo D1): una fila por a
 - v4: §3 añade la organización del código (tests en su propio árbol `test/` que replica `src/`, y `domain/` dividido en `calendar/`, `updates/` y `retry/`), decidida antes del bloque de la API. La §12 añade el prefijo de rama `refactor/<nombre>` para cambios estructurales sin cambio de comportamiento.
 - v5: decisiones tomadas al definir los escenarios de test de la API (`docs/scenarios/api.md`). §5: nueva columna `sync_tasks.last_attempt_at`. §6: `413`, `415` y `503` con `Retry-After`; un único formato para todos los errores; `404` para un `:id` inválido; la semántica de `attempts`, `lastError`, `nextAttemptAt` y `syncedAt` en updates con varios trozos. §8: `MAX_UPDATE_RANGE_DAYS`, `DATABASE_STARTUP_TIMEOUT_MS`, validación de la configuración, y comportamiento al arrancar y al apagar. Tras la review de la API: `Idempotency-Key` opcional (`updates.idempotency_key`, `422` si se reutiliza, cabecera de repetición); resiliencia de la base de datos en ejecución (errores del pool, `statement_timeout`/`lock_timeout`, timeout por petición); `SHUTDOWN_GRACE_MS`; §10/§11 explican por qué los duplicados no siempre son inofensivos y por qué el modelo por día queda fuera.
 - v6: decisiones tomadas al definir los escenarios de test del worker (`docs/scenarios/worker.md`). D5: se devuelven los permisos cuando no hay nada que reclamar, y la espera es cancelable. D6: el token de exclusión `attempts`. §5: `last_error` se borra tras un éxito; formato `"<status> <CODE>: <message>"` / `"timeout after <ms> ms"` / `"network error <code>"`. §8: `WORKER_ENABLED`. AC8: un timeout cercano a la mediana en lugar de 50 ms, con el que nunca convergería. AC9: "ninguna petición tras el 404" en lugar de "exactamente 1 petición" (el portal responde 503 aleatorios incluso para alojamientos desconocidos). §12: un servidor falso solo para fallos de transporte; Portal Sol en el CI. D9 (decisión del autor después de que L6 lo destapara): una ventana de espera tras un timeout (`last_timeout_at`, `PORTAL_TIMEOUT_SETTLE_MS`), riesgo residual en §10, verificación y reconciliación en §11. D6: todas las horas de la cola con el reloj de la base de datos (descubierto cuando el reloj de la VM de Docker se desvió 52 s tras el reposo). Tras la review del worker: la retención de D9 se evalúa al reclamar y solo en días solapados; en D5, tokens de permiso, comprobación de la pausa antes de enviar, un único worker activo por base de datos (advisory lock) y un limitador inicializado desde la base de datos.
+- v7: decisiones tomadas al definir los escenarios de test de las métricas (`docs/scenarios/metrics.md`). §7 reescrita: tareas pendientes por estado, cabezas atascadas, gauges del limitador y del worker activo, envíos aplazados, updates rechazados, antigüedad medida desde `accepted_at`, intervalos de los histogramas, `max()`/`sum()` con varias instancias, alertas actualizadas y entregadas también como `ops/alerts.yml`. §6: `/health` y `/ready`. AC13: las métricas deben coincidir con el log de peticiones del propio portal.
