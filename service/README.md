@@ -60,6 +60,22 @@ On startup the service waits for the database, applies pending migrations, liste
 
 Every error has the shape `{ "error": { "code", "message" } }`. Details in SPEC §6.
 
+## Observability
+
+- `GET /metrics`: Prometheus text format. It covers:
+  - pending tasks **by state** (`ready`, `in_flight`, `waiting_retry`, `held_settle`, `queued`) and the oldest pending age;
+  - stuck heads;
+  - portal calls by outcome, with latency;
+  - retries, finished tasks and the end-to-end lag;
+  - the limiter, and which instance runs the worker.
+
+  The full list is in SPEC §7.
+
+- `GET /health`: liveness (`200` while the process serves HTTP).
+- `GET /ready`: readiness (`503` when the database is unreachable); it also reports the worker state.
+- `../ops/alerts.yml`: Prometheus alert rules, ready to load. DB-derived gauges are the same on every instance, so aggregate them with `max()`; aggregate counters with `sum()`.
+- Logs are JSON (pino). Every portal attempt is one line with the task, the outcome, the HTTP status, the duration and the next attempt.
+
 ## Project layout
 
 ```

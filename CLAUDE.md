@@ -42,6 +42,7 @@ TypeScript is pinned to **5.9.x**: typescript-eslint supports TS < 6.1, so do no
 - Layout (SPEC §3): production code in `src/`, **all tests in `test/`**, never next to the code.
   - `src/domain/{calendar,updates,retry}/` hold pure logic with no I/O; `src/portal/` holds the client and rate limiter; `src/db/` holds the migrations and `repository.ts`; `src/http/`, `src/worker/`, `src/metrics/`.
   - `test/unit/` mirrors `src/` (the test for `src/x/y.ts` is `test/unit/x/y.test.ts`); `test/integration/` and `test/e2e/` hold tests that need services; `test/support/` holds shared helpers.
+  - `ops/alerts.yml` holds the Prometheus alert rules; a unit test checks that every metric it references exists.
   - Tests import production code as `#src/...` (a Node subpath import), never with `../../src`. ESLint enforces both directions, and `test/unit/layout.test.ts` fails if a test file sits where no Vitest project would run it.
 - **No ORM.** All SQL lives in `db/repository.ts` (SPEC D8). Migrations are numbered `.sql` files in `db/migrations/`.
 - Inject time (`now()`) and randomness (jitter) into domain logic so tests are deterministic.

@@ -155,3 +155,15 @@ Legend: 🤖 delegated to the AI · 👤 decided or done by the author · ⚠️
   - Deferred to `feature/metrics`: visibility of D9 holds and of head-of-line blocking. Accepted: the shutdown budget (only a lease is held, nothing is lost).
   - The reviewer noted that the portal has a `GET` endpoint, which makes read-back verification (§11) a realistic next step for D9's residual risk.
 - ⚠️ One more run was spoiled by the Mac sleeping (idle sleep in dark wake, despite `caffeinate -i`). Runs now use `caffeinate -dims`; unattended runs need power and the lid open.
+
+## Phase 6 — Observability (`feature/metrics`)
+
+- 🤖 Drafted ~25 scenarios (`docs/scenarios/metrics.md`) with 6 questions. 👤 Approved them all: SPEC v7. §7 was rewritten: pending tasks by state, stuck heads, limiter and worker gauges, `max()`/`sum()` across instances, `ops/alerts.yml`.
+- 🔍 **Probing the library before trusting it:**
+  - prom-client prints an unlabelled gauge **even after `reset()`** (as `0`), so "absent when the DB is down" was impossible with long-lived gauges. The DB-derived gauges now live in a registry built per scrape and merged only on success.
+  - ⚠️🔍 The AI's first code comment and scenario M2 claimed that prom-client rejects undocumented label values. It **accepts any value** and only rejects undeclared label names. The red test exposed it, and a probe confirmed it. The values are now enforced at compile time (`recordPortalCall`/`recordRetry` + `@ts-expect-error`); widening the type makes `tsc` fail.
+- ⚠️🔍 **Q5 passed against the stub:** the test helper reads a missing metric as `0`, so "`sync_metrics_db_up` is 0" held with nothing published. It was tightened to require the sample itself.
+- 🔍 **Q6 added while implementing:** the metrics' `ready` state and `claimTask` implement the same rules in two places and could drift. Q6 checks that they agree; a mutant that ignores D9 holds in the metrics fails it.
+- 🔍 **R1 (AC13) cross-checks the metrics against reality:** after a run against the real portal, the calls we count equal the PUTs in the portal's own log, 503s included.
+- 🔍 Mutation checks on the instrumentation: the lag on every chunk, uncounted failed siblings and counted replays are each caught (W3, W4, W6).
+- ⚠️ Several scripted edits stopped on their own match checks (Prettier reflowed lines, or a regex hit a parenthesis). Nothing was applied silently; each was redone on the real text. The lesson from Phase 3 (assert every replacement) paid off.
