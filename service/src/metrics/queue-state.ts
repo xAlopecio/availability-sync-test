@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { Gauge, Registry } from 'prom-client';
+import { heldBySettle } from '../db/queue-sql.ts';
 
 export const PENDING_STATES = [
   'ready',
@@ -26,14 +27,10 @@ export type QueueState = {
 export async function readQueueState(pool: pg.Pool, settleMs: number): Promise<QueueState> {
   const { rows } = await pool.query(
     `WITH p AS (
-       SELECT t.attempts, t.next_attempt_at, t.locked_until, u.accepted_at,
-              NOT EXISTS (SELECT 1 FROM sync_tasks e
-                           WHERE e.accommodation_id = t.accommodation_id
-                             AND e.status = 'pending' AND e.id < t.id) AS is_head,
-              EXISTS (SELECT 1 FROM sync_tasks d
-                       WHERE d.accommodation_id = t.accommodation_id AND d.id <> t.id
-                         AND d.last_timeout_at > now() - make_interval(secs => $1::double precision / 1000)
-                         AND daterange(d.date_from, d.date_to, '[]') && daterange(t.date_from, t.date_to, '[]')) AS held
+       SELECT t.id, t.accommodation_id, t.date_from, t.date_to, t.attempts, t.next_attempt_at,
+              t.locked_until, u.accepted_at,
+              -- Head of its accommodation's queue: the lowest pending id (one pass, no subquery per row).
+              t.id = min(t.id) OVER (PARTITION BY t.accommodation_id) AS is_head
          FROM sync_tasks t
          JOIN updates u ON u.id = t.update_id
         WHERE t.status = 'pending'
@@ -42,7 +39,8 @@ export async function readQueueState(pool: pg.Pool, settleMs: number): Promise<Q
                    WHEN locked_until > now() THEN 'in_flight'
                    WHEN NOT is_head THEN 'queued'
                    WHEN next_attempt_at > now() THEN 'waiting_retry'
-                   WHEN held THEN 'held_settle'
+                   -- Evaluated only for due heads (CASE short-circuits), with the partial index.
+                   WHEN ${heldBySettle('p', '$1')} THEN 'held_settle'
                    ELSE 'ready'
                  END AS state
          FROM p

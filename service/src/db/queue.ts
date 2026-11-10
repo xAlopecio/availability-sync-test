@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { heldBySettle } from './queue-sql.ts';
 
 /** A task claimed by a worker slot, with everything needed to send it. */
 export type ClaimedTask = {
@@ -37,12 +38,7 @@ export async function claimTask(
           -- D9: not while an overlapping task of this accommodation timed out less than the settle
           -- window ago (its abandoned request may still be applied late). Evaluated here, at claim
           -- time, so updates accepted after that task completed are held too.
-          AND NOT EXISTS (
-                SELECT 1 FROM sync_tasks d
-                 WHERE d.accommodation_id = t.accommodation_id
-                   AND d.id <> t.id
-                   AND d.last_timeout_at > now() - make_interval(secs => $2::double precision / 1000)
-                   AND daterange(d.date_from, d.date_to, '[]') && daterange(t.date_from, t.date_to, '[]'))
+          AND NOT ${heldBySettle('t', '$2')}
         ORDER BY t.next_attempt_at, t.id
         LIMIT 1
         FOR UPDATE SKIP LOCKED
