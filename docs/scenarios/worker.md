@@ -63,6 +63,8 @@ The claim query of SPEC D6 plus the three outcomes. Each claim returns a **fenci
 | Q9 / D4 | `fail` | The task **and the pending siblings of the same update** become `failed`, with the same error, in **one transaction**; the accommodation's next update becomes the head |
 | Q10 / D6 | A stale token (the lease expired and another worker re-claimed it) | `complete`/`reschedule`/`fail` is a no-op that returns `false`; the newer claim wins |
 | Q11 / D6 | A head row locked by another transaction (a slot mid-claim) — *added after mutation testing: removing `SKIP LOCKED` survived Q4, because Postgres waits and re-evaluates* | Another accommodation's head is claimed **immediately**, not after the lock is released |
+| Q12 / D9 | `reschedule` after a **timeout** — *added after L6 exposed late application* | Records `last_timeout_at`; other outcomes do not |
+| Q13 / D9 | `complete` of a task that had a timeout — *added after L6* | The accommodation's next pending tasks are not due before `last_timeout_at + settle`; other accommodations are unaffected; a task without a timeout delays nothing |
 
 ## 4. Rate limiter additions — `src/portal/rate-limiter.ts` (U)
 
@@ -88,6 +90,7 @@ The claim query of SPEC D6 plus the three outcomes. Each claim returns a **fenci
 | L9 | `stop()` while slots are waiting for a permit and one request is in flight | Waiting slots stop promptly (abort); the in-flight request finishes and its outcome is stored; `stop()` resolves; no claim afterwards |
 | L10 (I-db + fake client) | An idle worker with an empty queue for several poll intervals | **Consumes no permits** (the limiter still has its full window); no portal calls |
 | L11 (I-db + fake client) | Every attempt is logged | JSON line with `taskId`, `updateId`, `accommodationId`, `attempt`, `outcome`, `httpStatus`, `durationMs`, `nextAttemptAt` (SPEC §7); retries at `warn`, permanent failures at `error` |
+| L6 note / D9 | L6 failed intermittently: a timed-out PUT was applied **after** the next update (reproduced outside the tests, 1 in 14). With the settle window (short in the test), it must converge on every run. Worker tests also wait for the portal to go quiet before the next test's reset, because timed-out requests from one test could still be in flight in the next |
 
 ## 6. Wiring — `src/main.ts` (I-portal)
 

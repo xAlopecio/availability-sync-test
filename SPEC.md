@@ -121,6 +121,11 @@ The queries that make the system correct are Postgres-specific: `FOR UPDATE SKIP
 All SQL lives in a thin repository layer (`db/repository.ts`) that returns typed objects. The rest of the code does not know SQL exists, so swapping the data-access approach later touches one file. Migrations are numbered `.sql` files applied at startup by a small runner (`db/migrate.ts`) that tracks applied files in a `schema_migrations` table.
 *Considered:* Kysely, a typed query builder that supports `.forUpdate().skipLocked()`. It is a reasonable choice, but with two tables the type safety it adds does not justify one more dependency and its learning surface, and advisory locks would still be raw SQL.
 
+### D9. Late application after a timeout: a settle window
+A PUT that times out on our side may still be applied by the portal **later**, after we have retried it and moved on to the accommodation's next update. If that late application lands after the newer PUT, it overwrites those days with the older value. FIFO orders what we *send*, not what the portal *applies*, and idempotency does not help because the values differ. This was reproduced against the real portal: 1 stale final state out of 14 timed-out PUTs.
+
+So, when an attempt times out, the task records `last_timeout_at`. When that task later completes, the accommodation's next pending tasks are held until `last_timeout_at + PORTAL_TIMEOUT_SETTLE_MS` (default 30 s), long enough for the original request to finish. Only that accommodation waits, and only after a timeout. *Residual risk:* a portal that applies a request more than the settle window after our timeout. The full fix is read-back verification or periodic reconciliation (§11).
+
 ## 5. Data model (PostgreSQL)
 
 ```sql
@@ -145,6 +150,7 @@ sync_tasks (
   locked_until timestamptz,
   last_error text, last_http_status int,       -- of the most recent attempt; cleared on success
   last_attempt_at timestamptz,               -- when the last attempt started (sync-status, debugging)
+  last_timeout_at timestamptz,               -- last attempt that timed out (D9 settle window)
   completed_at timestamptz
 )
 -- indexes: (accommodation_id, status, id), (status, next_attempt_at)
@@ -236,7 +242,7 @@ Every error, including `404` for unknown routes, uses the same `{ "error": { "co
 
 ## 8. Configuration (env vars)
 
-`PORT=3000`, `DATABASE_URL=postgres://sync:sync@localhost:5432/sync`, `PORTAL_BASE_URL=http://localhost:4000`, `PORTAL_API_KEY=sol-demo-key`, `PORTAL_MAX_REQUESTS_PER_MINUTE=25`, `PORTAL_TIMEOUT_MS=5000`, `WORKER_CONCURRENCY=3`, `TASK_LEASE_MS=30000`, `RETRY_BASE_MS=1000`, `RETRY_MAX_MS=300000`, `WORKER_POLL_MS=500`, `WORKER_ENABLED=true` (`false` runs the API only), `LOG_LEVEL=info`, `MAX_UPDATE_RANGE_DAYS=366`, `DATABASE_STARTUP_TIMEOUT_MS=30000`, `SHUTDOWN_GRACE_MS=10000`.
+`PORT=3000`, `DATABASE_URL=postgres://sync:sync@localhost:5432/sync`, `PORTAL_BASE_URL=http://localhost:4000`, `PORTAL_API_KEY=sol-demo-key`, `PORTAL_MAX_REQUESTS_PER_MINUTE=25`, `PORTAL_TIMEOUT_MS=5000`, `WORKER_CONCURRENCY=3`, `TASK_LEASE_MS=30000`, `RETRY_BASE_MS=1000`, `RETRY_MAX_MS=300000`, `WORKER_POLL_MS=500`, `WORKER_ENABLED=true` (`false` runs the API only), `PORTAL_TIMEOUT_SETTLE_MS=30000` (D9), `LOG_LEVEL=info`, `MAX_UPDATE_RANGE_DAYS=366`, `DATABASE_STARTUP_TIMEOUT_MS=30000`, `SHUTDOWN_GRACE_MS=10000`.
 
 The configuration is validated at startup, and every invalid variable is reported at once. `TASK_LEASE_MS` must be greater than `PORTAL_TIMEOUT_MS` (D6).
 
@@ -273,10 +279,11 @@ Integration tests are slow by nature (the portal allows 30 requests per minute),
 - **No coalescing.** Superseded updates are still sent. Correct, but wasteful under heavy churn.
 - **`Idempotency-Key` is optional.** A duplicate is not always harmless under D1. If the connection drops during `COMMIT`, the update may be stored while the client gets a `503` and retries. If the client sent another update B in between, the retried A lands after B and the portal ends with A. With the key, the retry is recognised and nothing is stored again. Clients that do not send it accept that risk. (A per-day desired-state model would not remove it either: a retry is indistinguishable from a new change unless the client identifies it.)
 - **No drift detection.** If someone changes the portal outside this service, we don't notice.
+- **Late application beyond the settle window (D9).** If the portal applies a timed-out request more than `PORTAL_TIMEOUT_SETTLE_MS` after our timeout, a stale value can remain. Accepted: it needs a portal slower than 30 s on top of our 5 s timeout; read-back verification or reconciliation (§11) would close it.
 
 ## 11. Next steps (if there were more time)
 
-Per-day desired state with coalescing (replacing D1): one row per accommodation and day with the desired value and a version; the worker sends dirty days grouped into ranges and marks them synced only if their version did not change meanwhile. It saves requests when the same days change repeatedly and makes `sync-status` exact per day, at the cost of a new schema, repository and worker. Kept out on purpose: with D1 plus `Idempotency-Key` the final portal state is equally correct, and the API would not change; shared rate limiter for multiple instances; manual re-drive of failed updates; periodic reconciliation (`GET` and compare) during idle quota; `LISTEN/NOTIFY`.
+Per-day desired state with coalescing (replacing D1): one row per accommodation and day with the desired value and a version; the worker sends dirty days grouped into ranges and marks them synced only if their version did not change meanwhile. It saves requests when the same days change repeatedly and makes `sync-status` exact per day, at the cost of a new schema, repository and worker. Kept out on purpose: with D1 plus `Idempotency-Key` the final portal state is equally correct, and the API would not change; shared rate limiter for multiple instances; manual re-drive of failed updates; read-back verification after timeouts (the `GET` of the affected days once an accommodation's queue drains, re-queueing a correction on a mismatch) and periodic reconciliation (`GET` and compare) during idle quota, which close D9's residual risk; `LISTEN/NOTIFY`.
 
 ## 12. Working method
 
@@ -304,4 +311,4 @@ Per-day desired state with coalescing (replacing D1): one row per accommodation 
 - v3: changes from the `feature/core` review. Only `400`/`404` are permanent; any other undocumented status is retried as `unexpected_status`, with an alert, so it cannot drop an accepted update. `Retry-After` is capped at 10 min. The known `sync-status` limitation is documented.
 - v4: §3 adds the source layout (tests in their own `test/` tree mirroring `src/`, `domain/` split into `calendar/`, `updates/` and `retry/`), decided before the API block. §12 adds the `refactor/<name>` branch prefix for structural changes without behaviour change.
 - v5: decisions taken while defining the API test scenarios (`docs/scenarios/api.md`). §5: new `sync_tasks.last_attempt_at` column. §6: `413`, `415` and `503` with `Retry-After`; one error shape for every error; `404` for an invalid `:id`; the multi-chunk semantics of `attempts`, `lastError`, `nextAttemptAt` and `syncedAt`. §8: `MAX_UPDATE_RANGE_DAYS`, `DATABASE_STARTUP_TIMEOUT_MS`, config validation, and startup and shutdown behaviour. After the API review: optional `Idempotency-Key` (`updates.idempotency_key`, `422` on reuse, replay header); runtime database resilience (pool errors, `statement_timeout`/`lock_timeout`, request timeout); `SHUTDOWN_GRACE_MS`; §10/§11 explain why duplicates are not always harmless and why the per-day model stays out.
-- v6: decisions taken while defining the worker test scenarios (`docs/scenarios/worker.md`). D5: permits released when a claim finds nothing, cancellable waits. D6: the `attempts` fencing token. §5: `last_error` cleared on success, format `"<status> <CODE>: <message>"` / `"timeout after <ms> ms"` / `"network error <code>"`. §8: `WORKER_ENABLED`. AC8: a timeout near the median instead of 50 ms, which could never converge. AC9: "no request after the 404" instead of "exactly 1 request" (the portal answers random 503s even for unknown accommodations). §12: a fake server only for transport faults; Portal Sol in CI.
+- v6: decisions taken while defining the worker test scenarios (`docs/scenarios/worker.md`). D5: permits released when a claim finds nothing, cancellable waits. D6: the `attempts` fencing token. §5: `last_error` cleared on success, format `"<status> <CODE>: <message>"` / `"timeout after <ms> ms"` / `"network error <code>"`. §8: `WORKER_ENABLED`. AC8: a timeout near the median instead of 50 ms, which could never converge. AC9: "no request after the 404" instead of "exactly 1 request" (the portal answers random 503s even for unknown accommodations). §12: a fake server only for transport faults; Portal Sol in CI. D9 (author's decision after L6 exposed it): a settle window after a timeout (`last_timeout_at`, `PORTAL_TIMEOUT_SETTLE_MS`), residual risk in §10, verification and reconciliation in §11.
