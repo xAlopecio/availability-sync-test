@@ -219,7 +219,7 @@ Every error, including `404` for unknown routes, uses the same `{ "error": { "co
 
 **Logs:** pino JSON. Every portal call logs `taskId`, `updateId`, `accommodationId`, `attempt`, `outcome`, `httpStatus`, `durationMs` and `nextAttemptAt`. Retries are logged at `warn`, permanent failures at `error`.
 
-**Metrics** (`GET /metrics`, Prometheus text format, on the API port). Each app instance has its own registry, and Node's process metrics (`process_*`, `nodejs_*`) are included. There are no per-accommodation labels, because their cardinality is unbounded.
+**Metrics** (`GET /metrics`, Prometheus text format, on the API port). Each app instance has its own registry, and Node's process metrics (`process_*`, `nodejs_*`) are included. There are no per-accommodation labels, because their cardinality is unbounded. **Every documented label value is initialised at 0 at startup**: a labelled series that only appears at its first increment is invisible to `rate()`/`increase()`, so an alert would miss the first event after each restart, or could never fire at all.
 
 | Metric | Type | Purpose |
 |---|---|---|
@@ -227,7 +227,8 @@ Every error, including `404` for unknown routes, uses the same `{ "error": { "co
 | `sync_oldest_pending_task_age_seconds` | gauge (DB) | Age of the oldest pending update **since `accepted_at`**: how long a manager has been waiting. Measuring from the last attempt would reset on every retry. |
 | `sync_stuck_heads{min_attempts="10"}` | gauge (DB) | Accommodations whose head task has ≥ 10 attempts: head-of-line blocking (D1 + unlimited retries). |
 | `sync_head_attempts_max` | gauge (DB) | Highest attempt count among heads. |
-| `sync_metrics_db_up` | gauge | 1 if the DB-derived gauges could be read at this scrape. On 0 they are **absent**, never a false 0. |
+| `sync_metrics_db_up` | gauge | 1 if the queue state could be read at this scrape. The read has its own 3 s timeout. If it fails, the last good values are served with their age; with no previous read, the gauges are **absent**, never a false 0. |
+| `sync_queue_state_age_seconds` | gauge | Age of the queue gauges above (0 when read at this scrape). |
 | `portal_requests_total{outcome}` | counter | `success`, `rate_limited`, `unavailable`, `timeout`, `network_error`, `client_error`, `unauthorized`, `server_error`, `unexpected_status`. |
 | `portal_request_duration_seconds{outcome}` | histogram | Portal latency; buckets `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10` s. |
 | `sync_retries_total{reason}` | counter | Retries by transient outcome. |
@@ -235,22 +236,25 @@ Every error, including `404` for unknown routes, uses the same `{ "error": { "co
 | `sync_update_lag_seconds` | histogram | Acceptance → last chunk done, observed once per synced update (end-to-end health); buckets `1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600` s. |
 | `sync_sends_deferred_total` | counter | Sends skipped because the global pause started between claim and send (D5). |
 | `updates_accepted_total` | counter | Updates accepted (not idempotent replays). |
-| `updates_rejected_total{code}` | counter | Rejected `POST /updates` by error code. |
+| `updates_rejected_total{code}` | counter | `POST /updates` not accepted, by error code: the 4xx codes, and `UNAVAILABLE` when the database is down (503). |
+| `sync_stale_results_total` | counter | Attempt results discarded because the task's lease had been lost (fencing, D6): a sign of lease contention or a slow database. |
 | `portal_rate_limiter_paused_seconds` | gauge | What remains of the global pause after a 429. |
 | `portal_rate_limiter_window_starts` | gauge | Request starts in the current 60 s window. |
 | `sync_worker_active` | gauge | 1 on the instance holding the single-worker lock (D5); 0 on a standby or with the worker disabled. |
 
 **Several instances:** counters are per process, so aggregate them with `sum()`. The DB-derived gauges report the same value on every instance, so aggregate them with `max()`.
 
-**Alerts** (ready-to-use Prometheus rules in `ops/alerts.yml`):
+**Alerts** (ready-to-use Prometheus rules in `ops/alerts.yml`, with behaviour tests in `ops/alerts.test.yml` run by `promtool` in CI). Missing data must never read as healthy: `ServiceMetricsAbsent` fires when no instance exposes metrics.
 
 | Alert | Condition | Severity |
 |---|---|---|
 | Sync stuck | `max(sync_oldest_pending_task_age_seconds) > 600` for 5m | critical |
 | No active worker | `max(sync_worker_active) == 0` while work is pending, for 5m | critical |
-| Worker not sending | ready tasks exist and `sum(rate(portal_requests_total[5m])) == 0`, for 5m | critical |
+| Service metrics absent | `absent(sync_worker_active)` for 2m (no instance is being scraped) | critical |
+| Worker not sending | ready tasks exist and `sum(rate(portal_requests_total[5m])) == 0`, for 5m, **unless** the limiter is paused by a `Retry-After` | critical |
 | Bad credentials | `sum(increase(portal_requests_total{outcome="unauthorized"}[5m])) > 0` | critical |
 | Metrics cannot read the database | `min(sync_metrics_db_up) == 0` for 2m | critical |
+| Queue gauges stale | `max(sync_queue_state_age_seconds) > 120` (served from the last good read) | warning |
 | Stuck accommodation | `max(sync_stuck_heads) > 0` for 15m | warning |
 | Portal degraded | non-success ratio > 50 % over 10m (the baseline is about 25 %) | warning |
 | Unexpected throttling | any `rate_limited` in 10m (our limiter should prevent it) | warning |
@@ -333,4 +337,4 @@ Per-day desired state with coalescing (replacing D1): one row per accommodation 
 - v4: §3 adds the source layout (tests in their own `test/` tree mirroring `src/`, `domain/` split into `calendar/`, `updates/` and `retry/`), decided before the API block. §12 adds the `refactor/<name>` branch prefix for structural changes without behaviour change.
 - v5: decisions taken while defining the API test scenarios (`docs/scenarios/api.md`). §5: new `sync_tasks.last_attempt_at` column. §6: `413`, `415` and `503` with `Retry-After`; one error shape for every error; `404` for an invalid `:id`; the multi-chunk semantics of `attempts`, `lastError`, `nextAttemptAt` and `syncedAt`. §8: `MAX_UPDATE_RANGE_DAYS`, `DATABASE_STARTUP_TIMEOUT_MS`, config validation, and startup and shutdown behaviour. After the API review: optional `Idempotency-Key` (`updates.idempotency_key`, `422` on reuse, replay header); runtime database resilience (pool errors, `statement_timeout`/`lock_timeout`, request timeout); `SHUTDOWN_GRACE_MS`; §10/§11 explain why duplicates are not always harmless and why the per-day model stays out.
 - v6: decisions taken while defining the worker test scenarios (`docs/scenarios/worker.md`). D5: permits released when a claim finds nothing, cancellable waits. D6: the `attempts` fencing token. §5: `last_error` cleared on success, format `"<status> <CODE>: <message>"` / `"timeout after <ms> ms"` / `"network error <code>"`. §8: `WORKER_ENABLED`. AC8: a timeout near the median instead of 50 ms, which could never converge. AC9: "no request after the 404" instead of "exactly 1 request" (the portal answers random 503s even for unknown accommodations). §12: a fake server only for transport faults; Portal Sol in CI. D9 (author's decision after L6 exposed it): a settle window after a timeout (`last_timeout_at`, `PORTAL_TIMEOUT_SETTLE_MS`), residual risk in §10, verification and reconciliation in §11. D6: every queue time on the database clock (found when the Docker VM clock drifted 52 s after sleep). After the worker review: the D9 hold is evaluated at claim time on overlapping days; D5 permit tokens, a pause check before sending, one active worker per database (advisory lock) and a limiter seeded from the database.
-- v7: decisions taken while defining the metrics test scenarios (`docs/scenarios/metrics.md`). §7 rewritten: pending tasks by state, stuck heads, the limiter and active-worker gauges, deferred sends, rejected updates, oldest age measured from `accepted_at`, histogram buckets, `max()`/`sum()` across instances, alerts updated and also shipped as `ops/alerts.yml`. §6: `/health` and `/ready`. AC13: the metrics must agree with the portal's own request log.
+- v7: decisions taken while defining the metrics test scenarios (`docs/scenarios/metrics.md`). §7 rewritten: pending tasks by state, stuck heads, the limiter and active-worker gauges, deferred sends, rejected updates, oldest age measured from `accepted_at`, histogram buckets, `max()`/`sum()` across instances, alerts updated and also shipped as `ops/alerts.yml`. §6: `/health` and `/ready`. AC13: the metrics must agree with the portal's own request log. After the metrics review: label values initialised at 0; `ServiceMetricsAbsent`; WorkerNotSending not during a `Retry-After` pause; rule behaviour tests with `promtool`; the queue-state read bounded (own timeout, last good value with its age, an index for the D9 subquery); `sync_stale_results_total`; 503s counted as `UNAVAILABLE` rejections.

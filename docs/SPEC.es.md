@@ -221,7 +221,7 @@ Todos los errores, incluido el `404` de rutas desconocidas, usan el mismo format
 
 **Logs:** JSON con pino. Cada llamada al portal registra `taskId`, `updateId`, `accommodationId`, `attempt`, `outcome`, `httpStatus`, `durationMs` y `nextAttemptAt`. Los reintentos se registran en `warn` y los fallos permanentes en `error`.
 
-**Métricas** (`GET /metrics`, formato texto de Prometheus, en el puerto de la API). Cada instancia de la app tiene su propio registro, y se incluyen las métricas del proceso Node (`process_*`, `nodejs_*`). No hay etiquetas por alojamiento, porque su cardinalidad no tiene límite.
+**Métricas** (`GET /metrics`, formato texto de Prometheus, en el puerto de la API). Cada instancia de la app tiene su propio registro, y se incluyen las métricas del proceso Node (`process_*`, `nodejs_*`). No hay etiquetas por alojamiento, porque su cardinalidad no tiene límite. **Todos los valores de etiqueta documentados se inicializan a 0 al arrancar**: una serie con etiquetas que solo aparece en su primer incremento es invisible para `rate()`/`increase()`, así que una alerta no vería el primer evento tras cada reinicio, o no podría saltar nunca.
 
 | Métrica | Tipo | Para qué |
 |---|---|---|
@@ -229,7 +229,8 @@ Todos los errores, incluido el `404` de rutas desconocidas, usan el mismo format
 | `sync_oldest_pending_task_age_seconds` | gauge (BD) | Antigüedad del update pendiente más viejo **desde `accepted_at`**: cuánto lleva esperando un gestor. Medirla desde el último intento la reiniciaría en cada reintento. |
 | `sync_stuck_heads{min_attempts="10"}` | gauge (BD) | Alojamientos cuya tarea en cabeza lleva ≥ 10 intentos: bloqueo en cabeza de cola (D1 + reintentos ilimitados). |
 | `sync_head_attempts_max` | gauge (BD) | El mayor número de intentos entre las cabezas. |
-| `sync_metrics_db_up` | gauge | 1 si en este scrape se pudieron leer las gauges derivadas de la BD. Con 0 esas gauges **no aparecen**, nunca un 0 falso. |
+| `sync_metrics_db_up` | gauge | 1 si en este scrape se pudo leer el estado de la cola. La lectura tiene su propio timeout de 3 s. Si falla, se sirven los últimos valores buenos con su antigüedad; si no hubo ninguna lectura previa, las gauges **no aparecen**, nunca un 0 falso. |
+| `sync_queue_state_age_seconds` | gauge | Antigüedad de las gauges de la cola anteriores (0 si se leyeron en este scrape). |
 | `portal_requests_total{outcome}` | counter | `success`, `rate_limited`, `unavailable`, `timeout`, `network_error`, `client_error`, `unauthorized`, `server_error`, `unexpected_status`. |
 | `portal_request_duration_seconds{outcome}` | histogram | Latencia del portal; intervalos `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10` s. |
 | `sync_retries_total{reason}` | counter | Reintentos por resultado transitorio. |
@@ -237,22 +238,25 @@ Todos los errores, incluido el `404` de rutas desconocidas, usan el mismo format
 | `sync_update_lag_seconds` | histogram | De la aceptación al último trozo completado, una vez por update sincronizado (salud de extremo a extremo); intervalos `1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600` s. |
 | `sync_sends_deferred_total` | counter | Envíos omitidos porque la pausa global empezó entre la reclamación y el envío (D5). |
 | `updates_accepted_total` | counter | Updates aceptados (sin contar las repeticiones idempotentes). |
-| `updates_rejected_total{code}` | counter | `POST /updates` rechazados, por código de error. |
+| `updates_rejected_total{code}` | counter | `POST /updates` no aceptados, por código de error: los códigos 4xx, y `UNAVAILABLE` cuando la base de datos está caída (503). |
+| `sync_stale_results_total` | counter | Resultados de intentos descartados porque la tarea había perdido su lease (fencing, D6): señal de contención de leases o de una base de datos lenta. |
 | `portal_rate_limiter_paused_seconds` | gauge | Lo que queda de la pausa global tras un 429. |
 | `portal_rate_limiter_window_starts` | gauge | Inicios de petición en la ventana actual de 60 s. |
 | `sync_worker_active` | gauge | 1 en la instancia que tiene el lock de worker único (D5); 0 en una instancia en espera o con el worker desactivado. |
 
 **Varias instancias:** los contadores son por proceso, así que se agregan con `sum()`. Las gauges derivadas de la BD dan el mismo valor en todas las instancias, así que se agregan con `max()`.
 
-**Alertas** (reglas de Prometheus listas para usar en `ops/alerts.yml`):
+**Alertas** (reglas de Prometheus listas para usar en `ops/alerts.yml`, con tests de comportamiento en `ops/alerts.test.yml` que ejecuta `promtool` en el CI). La falta de datos nunca debe leerse como salud: `ServiceMetricsAbsent` salta cuando ninguna instancia expone métricas.
 
 | Alerta | Condición | Severidad |
 |---|---|---|
 | Sincronización atascada | `max(sync_oldest_pending_task_age_seconds) > 600` durante 5m | crítica |
 | Ningún worker activo | `max(sync_worker_active) == 0` con trabajo pendiente, durante 5m | crítica |
-| Worker sin enviar | hay tareas listas y `sum(rate(portal_requests_total[5m])) == 0`, durante 5m | crítica |
+| Métricas del servicio ausentes | `absent(sync_worker_active)` durante 2m (no se está haciendo scrape de ninguna instancia) | crítica |
+| Worker sin enviar | hay tareas listas y `sum(rate(portal_requests_total[5m])) == 0`, durante 5m, **salvo** que el limitador esté en pausa por un `Retry-After` | crítica |
 | Credenciales incorrectas | `sum(increase(portal_requests_total{outcome="unauthorized"}[5m])) > 0` | crítica |
 | Las métricas no pueden leer la BD | `min(sync_metrics_db_up) == 0` durante 2m | crítica |
+| Gauges de la cola desactualizadas | `max(sync_queue_state_age_seconds) > 120` (servidas desde la última lectura buena) | aviso |
 | Alojamiento atascado | `max(sync_stuck_heads) > 0` durante 15m | aviso |
 | Portal degradado | ratio de no-éxito > 50 % en 10m (la línea base ronda el 25 %) | aviso |
 | Throttling inesperado | algún `rate_limited` en 10m (nuestro limitador debería evitarlo) | aviso |
@@ -335,4 +339,4 @@ Estado deseado por día con fusión de updates (sustituyendo D1): una fila por a
 - v4: §3 añade la organización del código (tests en su propio árbol `test/` que replica `src/`, y `domain/` dividido en `calendar/`, `updates/` y `retry/`), decidida antes del bloque de la API. La §12 añade el prefijo de rama `refactor/<nombre>` para cambios estructurales sin cambio de comportamiento.
 - v5: decisiones tomadas al definir los escenarios de test de la API (`docs/scenarios/api.md`). §5: nueva columna `sync_tasks.last_attempt_at`. §6: `413`, `415` y `503` con `Retry-After`; un único formato para todos los errores; `404` para un `:id` inválido; la semántica de `attempts`, `lastError`, `nextAttemptAt` y `syncedAt` en updates con varios trozos. §8: `MAX_UPDATE_RANGE_DAYS`, `DATABASE_STARTUP_TIMEOUT_MS`, validación de la configuración, y comportamiento al arrancar y al apagar. Tras la review de la API: `Idempotency-Key` opcional (`updates.idempotency_key`, `422` si se reutiliza, cabecera de repetición); resiliencia de la base de datos en ejecución (errores del pool, `statement_timeout`/`lock_timeout`, timeout por petición); `SHUTDOWN_GRACE_MS`; §10/§11 explican por qué los duplicados no siempre son inofensivos y por qué el modelo por día queda fuera.
 - v6: decisiones tomadas al definir los escenarios de test del worker (`docs/scenarios/worker.md`). D5: se devuelven los permisos cuando no hay nada que reclamar, y la espera es cancelable. D6: el token de exclusión `attempts`. §5: `last_error` se borra tras un éxito; formato `"<status> <CODE>: <message>"` / `"timeout after <ms> ms"` / `"network error <code>"`. §8: `WORKER_ENABLED`. AC8: un timeout cercano a la mediana en lugar de 50 ms, con el que nunca convergería. AC9: "ninguna petición tras el 404" en lugar de "exactamente 1 petición" (el portal responde 503 aleatorios incluso para alojamientos desconocidos). §12: un servidor falso solo para fallos de transporte; Portal Sol en el CI. D9 (decisión del autor después de que L6 lo destapara): una ventana de espera tras un timeout (`last_timeout_at`, `PORTAL_TIMEOUT_SETTLE_MS`), riesgo residual en §10, verificación y reconciliación en §11. D6: todas las horas de la cola con el reloj de la base de datos (descubierto cuando el reloj de la VM de Docker se desvió 52 s tras el reposo). Tras la review del worker: la retención de D9 se evalúa al reclamar y solo en días solapados; en D5, tokens de permiso, comprobación de la pausa antes de enviar, un único worker activo por base de datos (advisory lock) y un limitador inicializado desde la base de datos.
-- v7: decisiones tomadas al definir los escenarios de test de las métricas (`docs/scenarios/metrics.md`). §7 reescrita: tareas pendientes por estado, cabezas atascadas, gauges del limitador y del worker activo, envíos aplazados, updates rechazados, antigüedad medida desde `accepted_at`, intervalos de los histogramas, `max()`/`sum()` con varias instancias, alertas actualizadas y entregadas también como `ops/alerts.yml`. §6: `/health` y `/ready`. AC13: las métricas deben coincidir con el log de peticiones del propio portal.
+- v7: decisiones tomadas al definir los escenarios de test de las métricas (`docs/scenarios/metrics.md`). §7 reescrita: tareas pendientes por estado, cabezas atascadas, gauges del limitador y del worker activo, envíos aplazados, updates rechazados, antigüedad medida desde `accepted_at`, intervalos de los histogramas, `max()`/`sum()` con varias instancias, alertas actualizadas y entregadas también como `ops/alerts.yml`. §6: `/health` y `/ready`. AC13: las métricas deben coincidir con el log de peticiones del propio portal. Tras la review de las métricas: valores de etiqueta inicializados a 0; `ServiceMetricsAbsent`; WorkerNotSending no salta durante una pausa por `Retry-After`; tests de comportamiento de las reglas con `promtool`; la lectura del estado de la cola acotada (timeout propio, último valor bueno con su antigüedad, un índice para la subconsulta de D9); `sync_stale_results_total`; los 503 contados como rechazos `UNAVAILABLE`.

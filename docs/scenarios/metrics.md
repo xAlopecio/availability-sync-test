@@ -25,6 +25,7 @@ Status: **v1, approved by the author** (2026-11-10). The decisions in §6 are cl
 | M2 | Label sets | Undeclared label **names** throw (no per-accommodation labels: unbounded cardinality). Label **values** are enforced at compile time by typed `record*` functions — *changed while implementing: prom-client accepts any label value, contrary to the first assumption* |
 | M3 | Two apps built in one process | Independent counters (a separate registry each) |
 | M4 | Node process metrics (`process_*`, `nodejs_*`) | Present (prom-client's default collectors on our registry) |
+| M5 | Every documented label value exists at 0 on a fresh registry — *added after the review: series born at their first increment are invisible to `increase()`, so alerts missed the first event or never fired* | `portal_requests_total{outcome}` for all 9 outcomes, retry reasons, results and rejection codes all present at 0; histograms zeroed per outcome |
 
 ## 2. Queue state, read from the database at scrape — `src/metrics/queue-state.ts` (I-db)
 
@@ -46,6 +47,7 @@ A single aggregate query per scrape. Every pending task falls into exactly one s
 | Q4 | **Stuck heads** (deferred from the worker review): heads with many attempts | `sync_stuck_heads{min_attempts="10"}` (the number of accommodations whose head has ≥ 10 attempts), plus `sync_head_attempts_max` |
 | Q5 | The database is unreachable during a scrape | `/metrics` still answers `200` with the process counters; `sync_metrics_db_up 0`; the DB-derived gauges are **absent**, not reported as a false 0 |
 | Q6 | `ready` vs the claim query — *added while implementing: the metrics and `claimTask` implement the same rules in two places, so they could drift* | The number of `ready` tasks equals the number `claimTask` can actually claim |
+| Q7 | The queue-state read exceeds its own timeout (or fails) after a good read — *added after the review: at 50k pending the read took 1.3 s, and a failing read made every queue gauge vanish* | The last good values are served, `sync_queue_state_age_seconds` > 0, `sync_metrics_db_up` 0 |
 
 ## 3. Instrumentation of the worker and the API — `src/worker/worker.ts`, `src/http/routes/updates.ts` (I-db + scripted client)
 
@@ -59,6 +61,9 @@ A single aggregate query per scrape. Every pending task falls into exactly one s
 | W6 / AC13 | `POST /updates` accepted / replayed (Idempotency-Key) / rejected (400) | `updates_accepted_total` +1 / +0 / +0; `updates_rejected_total{code}` +1 for the 400 |
 | W7 | Limiter state | `portal_rate_limiter_paused_seconds` = what remains of the global pause; `portal_rate_limiter_window_starts` = the starts in the current window |
 | W8 | Leadership (SPEC D5) | `sync_worker_active` = 1 on the lock holder, 0 on a standby or with `WORKER_ENABLED=false` |
+| W9 | A stale result (the lease was lost) — *added after the review* | `sync_stale_results_total` +1; no retry or finished counted |
+| W10 | The lag lookup fails after a completion — *added after the review: it used to throw into the slot loop, log a false "will be retried" and drop the attempt's log line* | The attempt is still logged as a success; no slot error |
+| W11 | `POST /updates` while the database is down — *added after the review* | `updates_rejected_total{code="UNAVAILABLE"}` +1 |
 
 ## 4. The metrics agree with reality — (I-portal)
 
@@ -73,6 +78,16 @@ A single aggregate query per scrape. Every pending task falls into exactly one s
 | H1 | `GET /health` (liveness) | `200 { "status": "ok" }` whenever the process serves HTTP, even with the DB down (restarting would not help) |
 | H2 | `GET /ready` (readiness) with the DB up | `200 { "status": "ready", "database": "up", "worker": "active" \| "standby" \| "disabled" }` |
 | H3 | `GET /ready` with the DB down | `503`, `"database": "down"`, in the API's error shape. A load balancer stops routing `POST /updates` that would 503 anyway |
+
+## 5b. Alert rules — `ops/alerts.test.yml` (`promtool test rules`) — *added after the review: the rules were only checked for metric names*
+
+| Id | Scenario | Expected |
+|---|---|---|
+| A2 | A restarted worker with ready tasks that never sends (no `portal_requests_total` samples change) | `WorkerNotSending` fires after 5 min |
+| A3 | The same, but the limiter is paused by a long `Retry-After` | `WorkerNotSending` does **not** fire; `RateLimiterPausedLong` does |
+| A4 | The first permanent failure after a restart (a counter that was 0 jumps to 3) | `PermanentFailures` fires |
+| A5 | No instance exposes metrics | `ServiceMetricsAbsent` fires after 2 min |
+| A6 | A healthy steady state | No alert fires |
 
 ---
 
