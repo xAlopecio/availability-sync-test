@@ -186,3 +186,21 @@ Legend: 🤖 delegated to the AI · 👤 decided or done by the author · ⚠️
   - Cause: a dead process stores no outcome, so no `last_timeout_at` is recorded and D9 never holds the overlapping successor. The next process re-claims after the lease, sends `201` and then `301`, and the dead process's original `201` can still land after both, exactly the late write D9 exists for.
   - Fix (`acf4cb4` red, `45af542` green): a re-claim of a lease that expired with no outcome records `last_timeout_at`, so a crash counts as a timeout. Integration test Q17 covers it, the D9 text in SPEC v8 is updated, and E1–E9 then passed twice in a row.
   - Lesson: the internal tests checked each mechanism against what the code *knew*. Only a real process kill showed what the portal could still receive.
+- ⚠️🔍 **The load test's first run failed on its own traffic.** After the burst, the test's ten state-read GETs count toward the portal's 30/min and drew a `429`. The "no 429" and "≤30 per 60 s" checks also read a log that included those GETs. The service was not at fault. `portalDays` now obeys `Retry-After`, and L1 and E8 snapshot the log before reading the portal state.
+- 🔍 Vitest 5 hides a passing test's `console.log`, so the L2 report never appeared. A probe confirmed it; the report now goes to `process.stdout`.
+- 🔍 **Review of the block (`deep`): `PROCEED`.** Root risk: **the e2e suite checks timing-dependent properties with timing-dependent oracles.** The reviewer confirmed that the `claimTask` change is correct under `FOR UPDATE SKIP LOCKED`, fencing and restarts, and that it cannot hold work forever.
+  - ✅ It independently found the load-test contamination, which we had already fixed (above).
+  - It called out that E3 hits "PUT in flight, then applied late" only by chance. The deterministic gate is Q17, and E3's comment, the scenarios and the PR now say so. 👤 The author decided against several kill cycles: they would still be probabilistic.
+  - 👤 Approved, all addressed:
+    - the metric is compared with the log only once the portal is quiet;
+    - the e2e lease went from 6 s to 12 s (1 s over the 5 s timeout invited re-claims of live attempts);
+    - re-claims are visible through `sync_tasks_reclaimed_total` and a warning (W12, SPEC v8 §7), and after `SIGTERM` the next process re-claims nothing (E4);
+    - D9's wording now says "a lease that expired with no stored outcome", not "the process died";
+    - the e2e CI timeout is 45 minutes;
+    - E6 reads `updates_accepted_total` instead of sleeping;
+    - E8 requires the standby's counter to exist.
+  - Accepted:
+    - the settle window stays a heuristic, with read-back verification (§11) as the generic fix; the review sees this block as the best argument for it;
+    - the late application of a killed connection's PUT was not measured separately (our timeout also tears the connection down, which is what was measured);
+    - the unpinned `:latest` portal image;
+    - a rare double `200` in E5.
