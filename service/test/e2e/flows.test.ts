@@ -97,6 +97,9 @@ describe('the service as a black box', () => {
     ['E3 / AC7', 'SIGKILL', null],
     ['E4', 'SIGTERM', 0],
   ] as const) {
+    // Restart safety, from the outside. Whether the kill lands while a PUT is in flight, and whether
+    // that PUT is then applied late, is up to timing: the deterministic gate for that case (D9 on
+    // a re-claim) is integration test Q17. A green run here does not prove it on its own.
     it(`${id}: ${signal} mid-sync loses nothing — the next process finishes the work`, async () => {
       const first = await start();
       const changes: Change[] = [
@@ -133,6 +136,12 @@ describe('the service as a black box', () => {
       const statuses = await waitAllSettled(second.baseUrl, accs, 240_000);
       for (const s of statuses) expect(s.body.status).toBe('synced');
       for (const acc of accs) expect(await portalMismatches(changes, acc)).toEqual([]);
+      // A graceful stop finishes or releases every attempt, so the next process re-claims nothing.
+      const reclaimed = (await second.api.metrics()).find(
+        (s) => s.name === 'sync_tasks_reclaimed_total',
+      );
+      expect(reclaimed).toBeDefined();
+      if (signal === 'SIGTERM') expect(reclaimed!.value).toBe(0);
     });
   }
 
@@ -176,7 +185,9 @@ describe('the service as a black box', () => {
       api.post({ ...valid, accommodationId: '../acc-1003' }),
     ]);
     expect(responses.map((r) => r.status)).toEqual([400, 400, 400]);
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    // Nothing was accepted, so nothing can ever be sent (no need to wait and watch the portal).
+    const m = await api.metrics();
+    expect(m.find((s) => s.name === 'updates_accepted_total')?.value).toBe(0);
     expect((await portalRequests()).filter((r) => r.method === 'PUT')).toEqual([]);
   });
 
@@ -247,7 +258,12 @@ describe('the service as a black box', () => {
     await postAll(active.api.post, changes.slice(0, 3));
     await postAll(standby.api.post, changes.slice(3)); // both instances accept updates
     await waitUntil(async () => (await putsOk()) >= 2, 60_000, 'the active process is sending');
-    expect(valueOf(await standby.api.metrics(), 'portal_requests_total')).toBe(0); // the standby never sent
+    // The standby never sent: its counters exist (initialised at 0) and are still 0.
+    const standbyCalls = (await standby.api.metrics()).filter(
+      (s) => s.name === 'portal_requests_total',
+    );
+    expect(standbyCalls.length).toBeGreaterThan(0);
+    expect(standbyCalls.every((s) => s.value === 0)).toBe(true);
 
     active.service.process.kill('SIGKILL');
     await active.service.exited;
@@ -259,6 +275,7 @@ describe('the service as a black box', () => {
     const accs = changes.map((c) => c.accommodationId);
     const statuses = await waitAllSettled(standby.baseUrl, accs, 180_000);
     // The services' traffic, snapshotted before the test's own GETs (they count toward the limit).
+    await waitForPortalQuiet();
     const log = (await portalRequests()).filter((r) => r.path.startsWith('/api/'));
     for (const s of statuses) expect(s.body.status).toBe('synced');
     for (const acc of accs) expect(await portalMismatches(changes, acc)).toEqual([]);

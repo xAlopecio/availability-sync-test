@@ -6,7 +6,8 @@ import { expectedDays, type Change } from './worker-harness.ts';
 
 /**
  * The real service as a black box (SPEC §12, AC14–AC15): production defaults, except a shorter
- * lease (a killed process's tasks come back in 6 s, not 30 s) and a 5 s retry cap (a streak of
+ * lease (a killed process's tasks come back in 12 s, not 30 s; still well above the 5 s portal
+ * timeout, so a slow CI runner does not re-claim live attempts) and a 5 s retry cap (a streak of
  * 503s cannot push one retry to 5 minutes). D9 keeps its real 30 s window.
  */
 export async function startE2E(dbName: string, env: Record<string, string> = {}) {
@@ -14,7 +15,7 @@ export async function startE2E(dbName: string, env: Record<string, string> = {})
     DATABASE_URL: databaseUrl(dbName),
     PORTAL_BASE_URL: PORTAL_URL,
     WORKER_ENABLED: 'true',
-    TASK_LEASE_MS: '6000',
+    TASK_LEASE_MS: '12000',
     RETRY_MAX_MS: '5000',
     ...env,
   });

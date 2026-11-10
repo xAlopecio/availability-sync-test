@@ -70,7 +70,9 @@ describe('load, black box', () => {
     const statuses = await waitAllSettled(e2e.baseUrl, ACCOMMODATIONS, budgetMs);
     const elapsedMin = (Date.now() - started) / 60_000;
 
-    // The service's traffic, snapshotted before the test's own GETs (they count toward the limit).
+    // The service's traffic, snapshotted before the test's own GETs (they count toward the limit),
+    // and once the portal is quiet: an abandoned PUT is only logged when the portal finishes it.
+    await waitForPortalQuiet();
     const log = (await portalRequests()).filter((r) => r.path.startsWith('/api/'));
     for (const s of statuses) expect(s.body.status).toBe('synced');
     for (const acc of ACCOMMODATIONS) expect(await portalMismatches(accepted, acc)).toEqual([]);
@@ -101,6 +103,7 @@ describe('load, black box', () => {
       lagP50s: Math.round(percentile(lags, 0.5)),
       lagP95s: Math.round(percentile(lags, 0.95)),
     };
-    console.log(`L2 load report: ${JSON.stringify(report)}`);
+    // stdout, not console.log: Vitest hides a passing test's console output.
+    process.stdout.write(`L2 load report: ${JSON.stringify(report)}\n`);
   });
 });

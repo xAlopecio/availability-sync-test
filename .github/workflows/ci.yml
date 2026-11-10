@@ -67,7 +67,7 @@ jobs:
     # Its own runner, so its own Portal Sol: the two suites never share the rate limit.
     name: end-to-end tests (the service as a black box)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     services:
       portal-sol:
         image: ghcr.io/avantio/portal-sol:latest
