@@ -142,3 +142,16 @@ Legend: 🤖 delegated to the AI · 👤 decided or done by the author · ⚠️
   - Long runs now use `caffeinate -i`.
 - 🔍 **The portal's documented slowness (> 5 s) finally showed up.** Tests that expect a status now treat a timeout as transient, like a 503.
 - ⚠️ **AI process slip:** one commit was made with a failing `npm run check` (formatting only), because the commands were chained with `;` instead of `&&`. Caught on re-reading the output and fixed in a separate commit (`545220e`).
+- 🔍 **Review of the block (`deep`): `PROCEED`, conditional on two HIGH fixes.** The reviewer ran `check`, wrote probes, and read the queue and loop closely.
+  - ⚠️🔍 **Root risk R1, real:** the D9 hold only delayed tasks already queued when the timed-out task completed. A manager's correction accepted seconds later was claimed at once, so the late write could overwrite it. Our L6 accepted every update before starting the worker, so it could never see this. Fixed by evaluating the hold **at claim time**, and only on **overlapping days** (Q15 reproduces R1; Q16 guards against over-holding).
+  - ⚠️🔍 **R2, real:** the worker's idle pause leaked one abort listener per poll. The reviewer measured ~535 B/poll, about 280 MB per idle day. No test runs long enough to notice. Fixed with `timers/promises` (L14 counts the listeners).
+  - Also fixed:
+    - a 429 race (pause re-checked right before sending, L13);
+    - `release()` returning another slot's permit (tokens, R14);
+    - an unexpected throw killing the process (L12);
+    - the client → worker type dependency.
+  - 👤 **Author's decision:** enforce a single active worker (a database advisory lock; others stand by) and seed the limiter from the database on start (WK1, WK2). Two replicas, or a restart, could otherwise exceed the portal's limit.
+  - ⚠️ WK1's first version **passed without an implementation**: the first worker drained the queue before the second started. Both now start before any work exists.
+  - Deferred to `feature/metrics`: visibility of D9 holds and of head-of-line blocking. Accepted: the shutdown budget (only a lease is held, nothing is lost).
+  - The reviewer noted that the portal has a `GET` endpoint, which makes read-back verification (§11) a realistic next step for D9's residual risk.
+- ⚠️ One more run was spoiled by the Mac sleeping (idle sleep in dark wake, despite `caffeinate -i`). Runs now use `caffeinate -dims`; unattended runs need power and the lid open.

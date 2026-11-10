@@ -30,7 +30,7 @@ Commands (run from `service/`):
 | `npm test` | Unit tests (`test/unit/`). Fast, no Docker needed. |
 | `npm run test:integration` | Integration tests (`test/integration/`) against real Portal Sol + Postgres. Slow: the portal rate-limits requests (30 req/min in the `base` variant). |
 
-Long portal-bound runs on this Mac: prefix them with `caffeinate -i`. The Mac sleeps on battery, which stalls the tests and makes the Docker VM's clock drift (52 s were seen).
+Long portal-bound runs on this Mac: prefix them with `caffeinate -dims`. The Mac sleeps on battery, which stalls the tests and makes the Docker VM's clock drift (52 s were seen). `-i` alone did not prevent sleep in dark wake (lid closed or screen off); keep the Mac on power with the lid open for unattended runs.
 | `npm run test:e2e` | End-to-end tests (`test/e2e/`): the whole service against the real portal. |
 
 TypeScript is pinned to **5.9.x**: typescript-eslint supports TS < 6.1, so do not upgrade to TS 7.
