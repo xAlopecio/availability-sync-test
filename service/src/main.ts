@@ -1,7 +1,11 @@
 import { ConfigError, loadConfig } from './config.ts';
 import { migrate } from './db/migrate.ts';
 import { createPool, waitForDatabase } from './db/pool.ts';
+import { DEFAULT_RETRY_POLICY } from './domain/retry/backoff.ts';
 import { buildApp } from './http/app.ts';
+import { createPortalClient } from './portal/client.ts';
+import { SlidingWindowRateLimiter } from './portal/rate-limiter.ts';
+import { createWorker, type Worker } from './worker/worker.ts';
 
 // Startup order (SPEC §8): config → database (retried) → migrations → HTTP. The port only opens
 // once updates can be persisted.
@@ -50,6 +54,31 @@ try {
   await fail('migration failed at startup; exiting without opening the port', error);
 }
 
+// The worker shares the process with the API (SPEC §3) unless WORKER_ENABLED=false.
+let worker: Worker | undefined;
+if (config.worker.enabled) {
+  worker = createWorker({
+    pool,
+    client: createPortalClient({
+      baseUrl: config.portal.baseUrl,
+      apiKey: config.portal.apiKey,
+      timeoutMs: config.portal.timeoutMs,
+    }),
+    // One limiter for every slot: the portal's limit is global (SPEC D5).
+    limiter: new SlidingWindowRateLimiter({
+      limit: config.portal.maxRequestsPerMinute,
+      windowMs: 60_000,
+    }),
+    log,
+    concurrency: config.worker.concurrency,
+    leaseMs: config.worker.leaseMs,
+    pollMs: config.worker.pollMs,
+    timeoutMs: config.portal.timeoutMs,
+    timeoutSettleMs: config.portal.timeoutSettleMs,
+    retry: { ...DEFAULT_RETRY_POLICY, baseMs: config.retry.baseMs, maxMs: config.retry.maxMs },
+  });
+}
+
 let shuttingDown = false;
 const shutdown = async (signal: NodeJS.Signals) => {
   if (shuttingDown) return;
@@ -61,6 +90,10 @@ const shutdown = async (signal: NodeJS.Signals) => {
     process.exit(1);
   }, config.shutdownGraceMs);
   try {
+    if (worker) {
+      await worker.stop(); // no new claims; in-flight attempts finish and store their outcome
+      log.info('worker stopped');
+    }
     await app.close(); // stops accepting connections, waits for in-flight requests
     log.info('http server closed');
     await pool.end();
@@ -76,3 +109,9 @@ process.once('SIGTERM', (signal) => void shutdown(signal));
 process.once('SIGINT', (signal) => void shutdown(signal));
 
 await app.listen({ port: config.port, host: '0.0.0.0' });
+if (worker) {
+  worker.start();
+  log.info({ concurrency: config.worker.concurrency }, 'worker started');
+} else {
+  log.info('worker disabled (WORKER_ENABLED=false): API only');
+}
