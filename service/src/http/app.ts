@@ -35,7 +35,7 @@ export function buildApp(deps: AppDependencies): FastifyInstance {
   app.removeContentTypeParser('text/plain');
   registerJsonBodyParser(app);
   const metrics = deps.metrics ?? createMetrics();
-  registerErrorHandling(app, metrics.updatesRejected);
+  registerErrorHandling(app, metrics.recordRejection);
   registerUpdateRoutes(app, { ...deps, metrics });
   registerSyncStatusRoutes(app, deps);
   registerObservabilityRoutes(app, {

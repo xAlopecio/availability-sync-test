@@ -1,5 +1,6 @@
 import type { Socket } from 'node:net';
 import type { FastifyError, FastifyInstance } from 'fastify';
+import type { RejectionCode } from '../metrics/registry.ts';
 
 /** The one error shape of the API (SPEC §6), the same as Portal Sol's. */
 export const errorBody = (code: string, message: string) => ({ error: { code, message } });
@@ -42,12 +43,13 @@ export function isDatabaseUnavailable(error: unknown): boolean {
 }
 
 /** Maps every failure, including Fastify's own (parsing, limits, 404), to the error shape. */
-/** Rejections of POST /updates that Fastify raises before the route runs (415, 413, bad JSON). */
-export type RejectionCounter = { inc(labels: { code: string }): void };
-
-export function registerErrorHandling(app: FastifyInstance, rejected?: RejectionCounter): void {
-  const reject = (request: { method: string; url: string }, code: string) => {
-    if (request.method === 'POST' && request.url.startsWith('/updates')) rejected?.inc({ code });
+/** Counts POST /updates that end without being accepted (415, 413, bad JSON, 503). */
+export function registerErrorHandling(
+  app: FastifyInstance,
+  rejected?: (code: RejectionCode) => void,
+): void {
+  const reject = (request: { method: string; url: string }, code: RejectionCode) => {
+    if (request.method === 'POST' && request.url.startsWith('/updates')) rejected?.(code);
   };
   app.setNotFoundHandler((request, reply) =>
     reply
@@ -72,6 +74,7 @@ export function registerErrorHandling(app: FastifyInstance, rejected?: Rejection
       return reply.code(400).send(errorBody('INVALID_BODY', error.message));
     }
     if (isDatabaseUnavailable(error)) {
+      reject(request, 'UNAVAILABLE');
       request.log.warn({ err: error }, 'database unavailable');
       return reply
         .code(503)

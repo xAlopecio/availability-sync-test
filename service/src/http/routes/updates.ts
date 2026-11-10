@@ -16,13 +16,13 @@ export function registerUpdateRoutes(
   app.post('/updates', async (request, reply) => {
     const result = validateUpdateRequest(request.body, { maxRangeDays: deps.maxUpdateRangeDays });
     if (!result.ok) {
-      deps.metrics.updatesRejected.inc({ code: result.error.code });
+      deps.metrics.recordRejection(result.error.code);
       return reply.code(400).send(errorBody(result.error.code, result.error.message));
     }
     const header = request.headers['idempotency-key'];
     const idempotencyKey = Array.isArray(header) ? header[0] : header;
     if (idempotencyKey !== undefined && !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
-      deps.metrics.updatesRejected.inc({ code: 'INVALID_HEADER' });
+      deps.metrics.recordRejection('INVALID_HEADER');
       return reply
         .code(400)
         .send(
@@ -45,7 +45,7 @@ export function registerUpdateRoutes(
       );
     } catch (error) {
       if (error instanceof IdempotencyKeyReusedError) {
-        deps.metrics.updatesRejected.inc({ code: 'IDEMPOTENCY_KEY_REUSED' });
+        deps.metrics.recordRejection('IDEMPOTENCY_KEY_REUSED');
         return reply.code(422).send(errorBody('IDEMPOTENCY_KEY_REUSED', error.message));
       }
       throw error;

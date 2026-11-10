@@ -126,8 +126,14 @@ export function createWorker(options: WorkerOptions): Worker {
     else {
       metrics.tasksFinished.inc({ result: 'done' });
       // Only the update's last chunk completes it: FIFO means its chunks never complete together.
-      const lagMs = await syncedUpdateLagMs(pool, task.updateId);
-      if (lagMs !== null) metrics.updateLag.observe(lagMs / 1000);
+      // The task is already done: a failing lookup must not turn into a slot error (which would
+      // log a false "will be retried" and drop the attempt's own log line).
+      try {
+        const lagMs = await syncedUpdateLagMs(pool, task.updateId);
+        if (lagMs !== null) metrics.updateLag.observe(lagMs / 1000);
+      } catch (error) {
+        log.warn({ err: error, updateId: task.updateId }, 'could not compute the update lag');
+      }
     }
   }
 
@@ -171,6 +177,7 @@ export function createWorker(options: WorkerOptions): Worker {
     }
 
     let applied: boolean;
+    let storeFailed = false;
     let failedCount = 0;
     try {
       applied =
@@ -189,6 +196,7 @@ export function createWorker(options: WorkerOptions): Worker {
               })) > 0;
     } catch (error) {
       // The lease expires and the task is retried; re-sending is safe (idempotent PUT).
+      storeFailed = true;
       log.error(
         { err: error, taskId: task.taskId },
         'could not store the attempt outcome; the lease will expire',
@@ -197,6 +205,8 @@ export function createWorker(options: WorkerOptions): Worker {
     }
 
     if (applied && options.metrics) await recordOutcome(task, action, failedCount);
+    // Not applied and not a store error: the fencing token was stale (another claim owns it).
+    if (!applied && !storeFailed) options.metrics?.staleResults.inc();
 
     const fields = {
       taskId: task.taskId,

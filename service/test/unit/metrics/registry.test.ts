@@ -49,6 +49,8 @@ describe('createMetrics', () => {
     const les = (name: string) =>
       samples
         .filter((s) => s.name === `${name}_bucket` && s.labels['le'] !== '+Inf')
+        // Histograms are zeroed for every outcome (M5): look at one series.
+        .filter((s) => s.labels['outcome'] === undefined || s.labels['outcome'] === 'success')
         .map((s) => Number(s.labels['le']));
     expect(les('portal_request_duration_seconds')).toEqual([0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]);
     expect(les('sync_update_lag_seconds')).toEqual([1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600]);

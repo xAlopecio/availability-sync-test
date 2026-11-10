@@ -126,6 +126,15 @@ export function createMetrics(): Metrics {
       registers,
     }),
   };
+  // Every documented label value starts at 0: a series that only appears at its first increment
+  // is invisible to rate()/increase(), so alerts would miss the first event after each restart.
+  for (const outcome of OUTCOMES) {
+    instruments.portalRequests.inc({ outcome }, 0);
+    instruments.portalRequestDuration.zero({ outcome });
+  }
+  for (const reason of RETRY_REASONS) instruments.retries.inc({ reason }, 0);
+  for (const result of ['done', 'failed']) instruments.tasksFinished.inc({ result }, 0);
+  for (const code of REJECTION_CODES) instruments.updatesRejected.inc({ code }, 0);
   return {
     ...instruments,
     recordPortalCall: (outcome, durationSeconds) => {
