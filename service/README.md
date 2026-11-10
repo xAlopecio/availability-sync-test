@@ -1,8 +1,6 @@
 # Availability sync service
 
-Syncs availability and price updates to Portal Sol. Design, decisions and acceptance criteria are in [`../SPEC.md`](../SPEC.md).
-
-> Work in progress: this README is completed as each block lands. Commands marked _(planned)_ are not wired yet.
+Syncs availability and price updates to Portal Sol without losing any, within the portal's limits. Design, decisions and acceptance criteria are in [`../SPEC.md`](../SPEC.md). How the work was done with AI is in [`../PROCESS.md`](../PROCESS.md).
 
 ## Requirements
 
@@ -74,7 +72,7 @@ Every error has the shape `{ "error": { "code", "message" } }`. Details in SPEC 
 - `GET /health`: liveness (`200` while the process serves HTTP).
 - `GET /ready`: readiness (`503` when the database is unreachable); it also reports the worker state.
 - `../ops/alerts.yml`: Prometheus alert rules, ready to load. DB-derived gauges are the same on every instance, so aggregate them with `max()`; aggregate counters with `sum()`.
-- Logs are JSON (pino). Every portal attempt is one line with the task, the outcome, the HTTP status, the duration and the next attempt.
+- Logs are JSON (pino). Every portal attempt is one line with the task, the outcome, the HTTP status, the duration and the next attempt. A task re-claimed after a crash is logged as a warning and counted in `sync_tasks_reclaimed_total`.
 
 ## Project layout
 
@@ -93,6 +91,23 @@ Tests import production code as `#src/...` (Node subpath import, see `package.js
 ```bash
 npm test                    # unit tests: fast, no Docker needed
 npm run test:integration    # against the real PostgreSQL and Portal Sol (start them first); a few minutes
-npm run test:e2e            # the whole service against the real portal; the slowest suite
-npm run check               # typecheck + lint + format check + unit tests (also runs in CI on every PR)
+npm run test:e2e            # the whole service, as a black box, against the real portal (~6 min)
+npm run test:alerts         # behaviour tests of ../ops/alerts.yml with promtool (Docker)
+npm run check               # typecheck + lint + format check + unit tests
 ```
+
+Integration and e2e tests are slow by nature (the portal allows 30 requests per minute), so scenarios are kept small. Because the portal's 503s are random, test timeouts are generous.
+
+CI (`.github/workflows/ci.yml`) runs four jobs on every PR: `check`; the integration suite and the e2e suite, each against its own PostgreSQL and Portal Sol; and the alert-rule tests.
+
+The test scenarios, written and approved before each block's tests, are in [`../docs/scenarios/`](../docs/scenarios/). Each test names the scenario or acceptance criterion it covers.
+
+## Measured behaviour
+
+The e2e load test (L1/L2, `base` portal variant) sends 50 concurrent updates over 10 accommodations. That is 58 tasks, because some updates span more than 31 days. It ends with every update `synced`, the portal state correct, no `429`, and at most 26 portal requests in any 60 s window:
+
+| Portal calls | 503 share | Wall time | Updates/min | Lag p50 / p95 |
+| ------------ | --------- | --------- | ----------- | ------------- |
+| 73           | 16 %      | 2.6 min   | 18.9        | 63 s / 130 s  |
+
+Throughput is bound by the portal's limit (25/min client-side, below its 30), not by the service. The lag is the time from acceptance to the last chunk synced.
