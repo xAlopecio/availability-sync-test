@@ -13,6 +13,11 @@ export type ClaimedTask = {
   readonly pricePerNight: number;
   /** `attempts` after this claim: the fencing token for complete/reschedule/fail (SPEC D6). */
   readonly attempt: number;
+  /**
+   * The previous lease expired with no stored outcome: its holder died or lost track of it
+   * mid-request (a crash, an unexpected slot error, a failed outcome write). Opens D9's window.
+   */
+  readonly reclaimed: boolean;
 };
 
 /** Claims the oldest due head-of-queue task (SPEC D1, D6), or `null` if none is claimable. */
@@ -25,7 +30,7 @@ export async function claimTask(
   // SKIP LOCKED lets concurrent slots pass over a head another slot is claiming right now.
   const { rows } = await pool.query(
     `WITH next AS (
-       SELECT t.id
+       SELECT t.id, t.locked_until IS NOT NULL AS reclaimed
          FROM sync_tasks t
         WHERE t.status = 'pending'
           AND t.next_attempt_at <= now()
@@ -47,15 +52,15 @@ export async function claimTask(
         SET locked_until = now() + make_interval(secs => $1::double precision / 1000),
             attempts = t.attempts + 1,
             last_attempt_at = now(),
-            -- D9: a lease that expired with no outcome means its process died mid-request (an
-            -- outcome always clears locked_until). That abandoned PUT may still be applied late,
-            -- exactly as after a timeout, so it opens the settle window too (found by e2e E3).
-            last_timeout_at = CASE WHEN t.locked_until IS NOT NULL THEN now()
-                                   ELSE t.last_timeout_at END
+            -- D9: a lease that expired with no stored outcome (every outcome clears
+            -- locked_until) means its holder lost the attempt mid-request, typically a crash. That
+            -- abandoned PUT may still be applied late, exactly as after a timeout, so it opens the
+            -- settle window too (found by e2e E3). Conservative when the PUT never left.
+            last_timeout_at = CASE WHEN next.reclaimed THEN now() ELSE t.last_timeout_at END
        FROM next, updates u
       WHERE t.id = next.id AND u.id = t.update_id
   RETURNING t.id, t.update_id, t.accommodation_id, t.chunk_index, t.date_from, t.date_to,
-            u.available, u.price_per_night, t.attempts`,
+            u.available, u.price_per_night, t.attempts, next.reclaimed`,
     [options.leaseMs, options.settleMs ?? 0],
   );
   const row = rows[0];
@@ -70,6 +75,7 @@ export async function claimTask(
     available: row.available,
     pricePerNight: row.price_per_night,
     attempt: row.attempts,
+    reclaimed: row.reclaimed,
   };
 }
 

@@ -24,6 +24,7 @@ describe('createMetrics', () => {
       portal_rate_limiter_window_starts: 'gauge',
       sync_worker_active: 'gauge',
       sync_stale_results_total: 'counter',
+      sync_tasks_reclaimed_total: 'counter',
     });
   });
 

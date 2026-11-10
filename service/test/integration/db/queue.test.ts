@@ -53,6 +53,7 @@ describe('claimTask', () => {
       available: false,
       pricePerNight: 19.99,
       attempt: 1,
+      reclaimed: false,
     });
     const row = await task(claimed!.taskId);
     expect(row.attempts).toBe(1);
@@ -314,6 +315,7 @@ describe('completeTask / rescheduleTask / failTask', () => {
       ]);
     const reclaimed = (await claimTask(db.pool(), { ...LEASE, settleMs: 60_000 }))!;
     expect(reclaimed.taskId).toBe(crashed.taskId);
+    expect([crashed.reclaimed, reclaimed.reclaimed]).toEqual([false, true]);
     expect((await task(crashed.taskId)).last_timeout_at).not.toBeNull();
     expect(await completeTask(db.pool(), reclaimed, { httpStatus: 200 })).toBe(true);
     expect(await claimTask(db.pool(), { ...LEASE, settleMs: 60_000 })).toBeNull(); // held

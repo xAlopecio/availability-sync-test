@@ -50,6 +50,7 @@ export type Metrics = {
   readonly recordRetry: (reason: RetryReason) => void;
   readonly recordRejection: (code: RejectionCode) => void;
   readonly staleResults: Counter;
+  readonly reclaimedTasks: Counter;
 };
 
 /**
@@ -146,6 +147,11 @@ export function createMetrics(): Metrics {
     staleResults: new Counter({
       name: 'sync_stale_results_total',
       help: 'Attempt results discarded because the lease had been lost (fencing).',
+      registers,
+    }),
+    reclaimedTasks: new Counter({
+      name: 'sync_tasks_reclaimed_total',
+      help: 'Tasks re-claimed after their lease expired with no stored outcome (crash recovery, D9).',
       registers,
     }),
   };

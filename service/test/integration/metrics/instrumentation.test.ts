@@ -226,6 +226,36 @@ describe('instrumentation edge cases', () => {
     expect(log.entries.some((e) => e.msg === 'portal attempt succeeded')).toBe(true);
     expect(log.entries.some((e) => /unexpected error in a worker slot/.test(e.msg))).toBe(false);
   });
+
+  it('W12 / D9: re-claiming a lease that expired with no outcome is counted and logged as a warning', async () => {
+    await acceptAll(db.pool(), [oneDay('acc-1001', 1)]);
+    // A process claimed the task and died mid-request: attempts and the lease, but no outcome.
+    await db
+      .pool()
+      .query(
+        "UPDATE sync_tasks SET attempts = 1, last_attempt_at = now(), locked_until = now() - interval '1 second'",
+      );
+    const m = createMetrics();
+    const log = captureLog();
+    const { worker } = testWorker(db.pool(), {
+      client: scripted([]).client,
+      metrics: m,
+      log,
+      concurrency: 1,
+    });
+    worker.start();
+    await waitUntil(
+      async () =>
+        valueOf(await samplesOf(m), 'sync_tasks_finished_total', { result: 'done' }) === 1,
+      10_000,
+      'the re-claimed task finishes',
+    );
+    await worker.stop();
+    expect(valueOf(await samplesOf(m), 'sync_tasks_reclaimed_total')).toBe(1);
+    const warning = log.entries.find((e) => /re-claimed/.test(e.msg));
+    expect(warning?.level).toBe('warn');
+    expect(warning?.obj).toMatchObject({ updateId: expect.any(Number), attempt: 2 });
+  });
 });
 
 describe('API and gauges instrumentation', () => {

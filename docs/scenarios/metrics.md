@@ -64,6 +64,7 @@ A single aggregate query per scrape. Every pending task falls into exactly one s
 | W9 | A stale result (the lease was lost) — *added after the review* | `sync_stale_results_total` +1; no retry or finished counted |
 | W10 | The lag lookup fails after a completion — *added after the review: it used to throw into the slot loop, log a false "will be retried" and drop the attempt's log line* | The attempt is still logged as a success; no slot error |
 | W11 | `POST /updates` while the database is down — *added after the review* | `updates_rejected_total{code="UNAVAILABLE"}` +1 |
+| W12 / D9 | A task whose lease expired with no stored outcome is re-claimed — *added after the e2e review: crash recovery was invisible* | `sync_tasks_reclaimed_total` is 1 and a warning names the update and the attempt |
 
 ## 4. The metrics agree with reality — (I-portal)
 
