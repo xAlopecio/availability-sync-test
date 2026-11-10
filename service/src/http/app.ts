@@ -2,6 +2,8 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { clientErrorHandler, registerErrorHandling } from './errors.ts';
 import { registerJsonBodyParser } from './json-body.ts';
+import { createMetrics, type Metrics } from '../metrics/registry.ts';
+import { registerObservabilityRoutes, type WorkerState } from './routes/observability.ts';
 import { registerSyncStatusRoutes } from './routes/sync-status.ts';
 import { registerUpdateRoutes } from './routes/updates.ts';
 
@@ -10,6 +12,10 @@ export type AppDependencies = {
   readonly maxUpdateRangeDays: number;
   /** Fastify logger options; `false` silences it (tests). */
   readonly logger?: boolean | { level: string };
+  /** The service's metrics; a fresh set if not given (tests). */
+  readonly metrics?: Metrics;
+  /** What `/ready` reports about the worker; `disabled` if not given. */
+  readonly workerState?: () => WorkerState;
 };
 
 /** Builds the HTTP app without listening, so tests can drive it with `inject()`. */
@@ -27,5 +33,10 @@ export function buildApp(deps: AppDependencies): FastifyInstance {
   registerErrorHandling(app);
   registerUpdateRoutes(app, deps);
   registerSyncStatusRoutes(app, deps);
+  registerObservabilityRoutes(app, {
+    pool: deps.pool,
+    metrics: deps.metrics ?? createMetrics(),
+    workerState: deps.workerState ?? (() => 'disabled'),
+  });
   return app;
 }

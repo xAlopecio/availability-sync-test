@@ -22,7 +22,7 @@ Status: **v1, approved by the author** (2026-11-10). The decisions in §6 are cl
 | Id | Scenario | Expected |
 |---|---|---|
 | M1 | `GET /metrics` on a fresh app | `200`, `Content-Type: text/plain; version=0.0.4`; every SPEC §7 metric (and those added in §2 below) has `# HELP` and `# TYPE` with the right type |
-| M2 | Label sets | `portal_requests_total` / `portal_request_duration_seconds` only take the documented `outcome` values; `sync_retries_total{reason}` and `sync_tasks_finished_total{result}` likewise; **no per-accommodation labels** (unbounded cardinality) |
+| M2 | Label sets | Undeclared label **names** throw (no per-accommodation labels: unbounded cardinality). Label **values** are enforced at compile time by typed `record*` functions — *changed while implementing: prom-client accepts any label value, contrary to the first assumption* |
 | M3 | Two apps built in one process | Independent counters (a separate registry each) |
 | M4 | Node process metrics (`process_*`, `nodejs_*`) | Present (prom-client's default collectors on our registry) |
 

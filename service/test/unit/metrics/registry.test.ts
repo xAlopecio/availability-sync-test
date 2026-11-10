@@ -26,11 +26,18 @@ describe('createMetrics', () => {
     });
   });
 
-  it('M2: outcome-labelled instruments accept only the documented outcomes; no per-accommodation labels', () => {
+  it('M2: undeclared label names throw; undocumented outcome values do not compile', () => {
     const m = createMetrics();
-    for (const outcome of OUTCOMES) expect(() => m.portalRequests.inc({ outcome })).not.toThrow();
-    expect(() => m.portalRequests.inc({ outcome: 'surprise' as never })).toThrow();
+    for (const outcome of OUTCOMES) expect(() => m.recordPortalCall(outcome, 0.1)).not.toThrow();
+    // prom-client rejects an undeclared label NAME at runtime (no per-accommodation labels)…
     expect(() => m.portalRequests.inc({ accommodationId: 'acc-1003' } as never)).toThrow();
+    // …but accepts any label VALUE, so the documented values are enforced by the types (tsc).
+    if (Math.random() > 2) {
+      // @ts-expect-error 'surprise' is not a documented outcome
+      m.recordPortalCall('surprise', 0.1);
+      // @ts-expect-error a successful call is never a retry reason
+      m.recordRetry('success');
+    }
   });
 
   it('M2: histogram buckets as decided (SPEC §7)', async () => {

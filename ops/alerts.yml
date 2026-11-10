@@ -1,2 +1,101 @@
-# Prometheus alert rules for the availability sync service (SPEC §7). Filled in by the metrics block.
-groups: []
+# Prometheus alerting rules for the availability sync service (SPEC §7).
+# DB-derived gauges are reported identically by every instance: aggregate them with max().
+# Counters are per process: aggregate them with sum().
+groups:
+  - name: availability-sync
+    rules:
+      - alert: SyncStuck
+        expr: max(sync_oldest_pending_task_age_seconds) > 600
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: An accepted update has been waiting more than 10 minutes to reach Portal Sol.
+          runbook: Check sync_tasks_pending by state, sync_stuck_heads and the worker logs (lastError in sync-status).
+
+      - alert: NoActiveWorker
+        expr: max(sync_worker_active) == 0 and max(sum without (state) (sync_tasks_pending)) > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: Work is pending but no instance holds the worker lock (all disabled or standby).
+
+      - alert: WorkerNotSending
+        expr: max(sync_tasks_pending{state="ready"}) > 0 and sum(rate(portal_requests_total[5m])) == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: Tasks are ready to send but no portal call has been made for 5 minutes.
+
+      - alert: PortalBadCredentials
+        expr: sum(increase(portal_requests_total{outcome="unauthorized"}[5m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: Portal Sol rejects the API key (401). Nothing will sync until PORTAL_API_KEY is fixed.
+
+      - alert: MetricsCannotReadDatabase
+        expr: min(sync_metrics_db_up) == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: The service cannot read its database; the queue gauges are missing.
+
+      - alert: StuckAccommodation
+        expr: max(sync_stuck_heads) > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: An accommodation's head task has 10+ attempts and blocks its queue (FIFO). See its sync-status lastError.
+
+      - alert: PortalDegraded
+        expr: |
+          sum(rate(portal_requests_total{outcome!="success"}[10m]))
+            / sum(rate(portal_requests_total[10m])) > 0.5
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: More than half of the portal calls fail (the measured baseline is about 25 %).
+
+      - alert: UnexpectedThrottling
+        expr: sum(increase(portal_requests_total{outcome="rate_limited"}[10m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: Portal Sol answered 429. Our limiter should prevent it; check PORTAL_MAX_REQUESTS_PER_MINUTE or another client.
+
+      - alert: RateLimiterPausedLong
+        expr: max(portal_rate_limiter_paused_seconds) > 300
+        labels: { severity: warning }
+        annotations:
+          summary: Sends are paused for more than 5 minutes by a Retry-After.
+
+      - alert: UnexpectedPortalResponses
+        expr: sum(increase(portal_requests_total{outcome="unexpected_status"}[10m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: Portal Sol answered an undocumented status; the task is retried, but someone should look.
+
+      - alert: PermanentFailures
+        expr: sum(increase(sync_tasks_finished_total{result="failed"}[15m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: Some updates failed permanently (400/404) and will not reach the portal.
+
+      - alert: SettleHoldsPersisting
+        expr: max(sync_tasks_pending{state="held_settle"}) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: Tasks keep being held by the D9 settle window, which means repeated portal timeouts.
+
+      - alert: PortalSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(portal_request_duration_seconds_bucket[10m]))) > 3
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: p95 of portal latency above 3 s (the timeout is 5 s).
+
+      - alert: SyncLagHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(sync_update_lag_seconds_bucket[15m]))) > 600
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: p95 of acceptance-to-synced above 10 minutes.
