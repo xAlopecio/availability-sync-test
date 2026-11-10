@@ -1,13 +1,13 @@
 # SPEC — Availability sync service
 
-Status: **initial version, written before any code**. Later changes are tracked in git history and summarised in §12.
+Status: **v9, final for delivery.** v1 was written before any code and is the repository's first commit; every later change is in git history and summarised in the changelog (§12).
 
 ## 1. Goal
 
 A Node.js + TypeScript service that accepts availability/price updates from property managers, persists them durably, and propagates them to **Portal Sol** reliably, respecting its limits, so that the portal eventually reflects exactly what the manager asked for. It exposes per-accommodation sync status and enough metrics/logs for on-call to judge sync health.
 
 ### Non-goals
-Authentication, UI, deployment, dashboards/alerting stack, multiple portals, multiple service instances (see §10), reconciling changes made to the portal by third parties.
+Authentication, UI, deployment, dashboards/alerting stack, multiple portals, more than one instance sending at a time (several may serve the API; see D5 and §10), reconciling changes made to the portal by third parties.
 
 ## 2. What we know about Portal Sol
 
@@ -307,7 +307,7 @@ Integration tests are slow by nature (the portal allows 30 requests per minute),
 - **No coalescing.** Superseded updates are still sent. Correct, but wasteful under heavy churn.
 - **`Idempotency-Key` is optional.** A duplicate is not always harmless under D1. If the connection drops during `COMMIT`, the update may be stored while the client gets a `503` and retries. If the client sent another update B in between, the retried A lands after B and the portal ends with A. With the key, the retry is recognised and nothing is stored again. Clients that do not send it accept that risk. (A per-day desired-state model would not remove it either: a retry is indistinguishable from a new change unless the client identifies it.)
 - **No drift detection.** If someone changes the portal outside this service, we don't notice.
-- **Late application beyond the settle window (D9).** If the portal applies a timed-out request more than `PORTAL_TIMEOUT_SETTLE_MS` after our timeout, a stale value can remain. Accepted: it needs a portal slower than 30 s on top of our 5 s timeout; read-back verification or reconciliation (§11) would close it.
+- **Late application beyond the settle window (D9).** If the portal applies a timed-out (or crash-abandoned) request more than `PORTAL_TIMEOUT_SETTLE_MS` after our timeout (or the re-claim), a stale value can remain. Accepted: it needs a portal slower than 30 s on top of our 5 s timeout (after a crash, more than the lease plus the window after the send); read-back verification or reconciliation (§11) would close it.
 
 ## 11. Next steps (if there were more time)
 
@@ -324,14 +324,14 @@ Per-day desired state with coalescing (replacing D1): one row per accommodation 
     - `refactor/<name>`: structural change with no behaviour change (e.g. `refactor/structure`).
     - `docs/<name>`: documentation only.
   - Nothing is committed directly to `master` or `develop`.
-- **TDD for `domain/` and the limiter:** write the scenarios from §9 as failing tests, implement, then refactor.
+- **Scenarios first, then TDD.** Each block's test scenarios are written in `docs/scenarios/` and approved by the author before any test exists. They are then implemented red → green → refactor; strict TDD for `domain/` and the limiter. Each test names the scenario or acceptance criterion (§9) it covers.
 - **End-to-end tests** (AC14–AC15) start the real process and use it only through its public interface, as a client would. They use production defaults, except a shorter lease and retry cap so that a run stays bounded. They run as their own CI job.
 - **Integration tests** for the behaviours that only the real portal can prove (AC4–AC9, AC12–AC13), with the worker in-process. Sync behaviour is **never** tested against a simulated portal. A local fake HTTP server is used only for the client's transport faults (timeouts, resets, refused connections, non-JSON bodies), which the real portal cannot produce on demand. CI runs the integration suite against PostgreSQL **and the real Portal Sol image**.
 - **AI-assisted.** A `CLAUDE.md` holds the stack, conventions, environment setup and the "tests first" rule. Two project skills:
   - `tdd-cycle`: red → green → refactor, with a commit per step.
   - `verify-portal`: reset the portal, run a scenario, then check `/__admin/requests` and the portal's final state.
 
-  Everything the AI writes is validated by those tests and by reading the diff. Corrections are recorded in `PROCESS.md`.
+  Everything the AI writes is validated by those tests and by reading the diff. Before each block's PR, an adversarial `review` agent (`.claude/agents/review.md`) reviews the whole branch given only the SPEC excerpts, the external constraints and the diff, never our reasoning. Its risks are addressed or accepted by the author and recorded in the PR. Corrections are logged as they happen in `docs/PROCESS-LOG.md` and distilled into `PROCESS.md`.
 - Preparation notes (portal probe and decision analysis) live in `docs/CONTEXTO.md`.
 
 ### Changelog
@@ -343,3 +343,4 @@ Per-day desired state with coalescing (replacing D1): one row per accommodation 
 - v6: decisions taken while defining the worker test scenarios (`docs/scenarios/worker.md`). D5: permits released when a claim finds nothing, cancellable waits. D6: the `attempts` fencing token. §5: `last_error` cleared on success, format `"<status> <CODE>: <message>"` / `"timeout after <ms> ms"` / `"network error <code>"`. §8: `WORKER_ENABLED`. AC8: a timeout near the median instead of 50 ms, which could never converge. AC9: "no request after the 404" instead of "exactly 1 request" (the portal answers random 503s even for unknown accommodations). §12: a fake server only for transport faults; Portal Sol in CI. D9 (author's decision after L6 exposed it): a settle window after a timeout (`last_timeout_at`, `PORTAL_TIMEOUT_SETTLE_MS`), residual risk in §10, verification and reconciliation in §11. D6: every queue time on the database clock (found when the Docker VM clock drifted 52 s after sleep). After the worker review: the D9 hold is evaluated at claim time on overlapping days; D5 permit tokens, a pause check before sending, one active worker per database (advisory lock) and a limiter seeded from the database.
 - v7: decisions taken while defining the metrics test scenarios (`docs/scenarios/metrics.md`). §7 rewritten: pending tasks by state, stuck heads, the limiter and active-worker gauges, deferred sends, rejected updates, oldest age measured from `accepted_at`, histogram buckets, `max()`/`sum()` across instances, alerts updated and also shipped as `ops/alerts.yml`. §6: `/health` and `/ready`. AC13: the metrics must agree with the portal's own request log. After the metrics review: label values initialised at 0; `ServiceMetricsAbsent`; WorkerNotSending not during a `Retry-After` pause; rule behaviour tests with `promtool`; the queue-state read bounded (own timeout, last good value with its age, an index for the D9 subquery); `sync_stale_results_total`; 503s counted as `UNAVAILABLE` rejections.
 - v8: end-to-end block (`docs/scenarios/e2e.md`): AC14 (concurrent load, black box) and AC15 (crash, graceful restart and rolling deploy, black box); §12 describes the e2e suite and its CI job. D9: a lease that expires with no outcome (a crash mid-request) also opens the settle window, found by the `SIGKILL` e2e test. After the e2e review: §7 `sync_tasks_reclaimed_total` and a warning log for each re-claim.
+- v9: final pass for delivery. Status line; non-goals say one *sending* instance (several may serve the API, D5); §10 extends D9's residual risk to crash-abandoned requests; §12 describes the scenarios approved before tests, the per-block adversarial review and `docs/PROCESS-LOG.md`.
