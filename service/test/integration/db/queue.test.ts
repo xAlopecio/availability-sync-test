@@ -300,4 +300,29 @@ describe('completeTask / rescheduleTask / failTask', () => {
     expect(await completeTask(db.pool(), first, { httpStatus: 200 })).toBe(true);
     expect((await claimTask(db.pool(), { ...LEASE, settleMs: 60_000 }))?.updateId).toBe(next);
   });
+
+  it('Q17 / D9: re-claiming an expired lease treats the abandoned attempt as a possible late write', async () => {
+    // A process claimed the task, sent its PUT and died (SIGKILL): no outcome was ever stored, so
+    // the portal may still apply that request late, exactly as after a timeout (found by E3).
+    await accept({ accommodationId: 'acc-1001' });
+    const next = await accept({ accommodationId: 'acc-1001' }); // same days: overlaps
+    const crashed = (await claim())!;
+    await db
+      .pool()
+      .query("UPDATE sync_tasks SET locked_until = now() - interval '1 second' WHERE id = $1", [
+        crashed.taskId,
+      ]);
+    const reclaimed = (await claimTask(db.pool(), { ...LEASE, settleMs: 60_000 }))!;
+    expect(reclaimed.taskId).toBe(crashed.taskId);
+    expect((await task(crashed.taskId)).last_timeout_at).not.toBeNull();
+    expect(await completeTask(db.pool(), reclaimed, { httpStatus: 200 })).toBe(true);
+    expect(await claimTask(db.pool(), { ...LEASE, settleMs: 60_000 })).toBeNull(); // held
+    expect((await claimTask(db.pool(), { ...LEASE, settleMs: 0 }))?.updateId).toBe(next);
+  });
+
+  it('Q17: a first claim (no earlier lease) records no timeout', async () => {
+    await accept({ accommodationId: 'acc-1001' });
+    const first = (await claim())!;
+    expect((await task(first.taskId)).last_timeout_at).toBeNull();
+  });
 });
