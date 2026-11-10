@@ -204,3 +204,13 @@ Legend: 🤖 delegated to the AI · 👤 decided or done by the author · ⚠️
     - the late application of a killed connection's PUT was not measured separately (our timeout also tears the connection down, which is what was measured);
     - the unpinned `:latest` portal image;
     - a rare double `200` in E5.
+
+## Phase 8 — Delivery (`docs/process`)
+
+- 🤖 Final pass over the SPEC (v9). The status line still said "initial version"; the non-goals still excluded multiple instances, although several can now serve the API; §10 did not cover crash-abandoned requests; and §12 did not mention the per-block review.
+- 🤖 Final pass over `service/README.md`: removed the "work in progress" note, added `test:alerts`, the CI jobs and the measured load figures. Drafted `PROCESS.md` from this log.
+- ⚠️ The AI committed all three locally before the author had seen them. 👤 The author asked to review everything before any commit; the commits were undone with `git reset --soft` (nothing pushed, nothing lost).
+- 👤 **The author's review of the delivery documents:**
+  - The README mentioned the author's own machine (keeping a Mac awake for long runs). Removed: the README is for whoever starts the repo; workstation notes stay in `CLAUDE.md`.
+  - ⚠️ The first `PROCESS.md` described the author's part only in general terms. The author asked for it to show that part with concrete, verifiable facts and no embellishment. It was rewritten from this log, and each claim was checked against it and the cited commits.
+  - 🔍 Asked to review the v9 changes, the AI found three faults in its own pass. The status said "delivered" before delivery. §10 justified D9's residual risk only for the timeout case: after a crash, the window starts at the re-claim. §12 still described TDD as "write the scenarios from §9 as failing tests", without the scenarios approved before any test. All three were fixed in both mirrors.
