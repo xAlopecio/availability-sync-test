@@ -46,7 +46,12 @@ export async function claimTask(
      UPDATE sync_tasks t
         SET locked_until = now() + make_interval(secs => $1::double precision / 1000),
             attempts = t.attempts + 1,
-            last_attempt_at = now()
+            last_attempt_at = now(),
+            -- D9: a lease that expired with no outcome means its process died mid-request (an
+            -- outcome always clears locked_until). That abandoned PUT may still be applied late,
+            -- exactly as after a timeout, so it opens the settle window too (found by e2e E3).
+            last_timeout_at = CASE WHEN t.locked_until IS NOT NULL THEN now()
+                                   ELSE t.last_timeout_at END
        FROM next, updates u
       WHERE t.id = next.id AND u.id = t.update_id
   RETURNING t.id, t.update_id, t.accommodation_id, t.chunk_index, t.date_from, t.date_to,
