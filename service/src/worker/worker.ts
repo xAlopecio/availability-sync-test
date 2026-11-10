@@ -39,6 +39,8 @@ export type WorkerOptions = {
   readonly timeoutSettleMs?: number;
   readonly retry: RetryPolicy;
   readonly random?: () => number;
+  /** Test hook: called right after a task is claimed, before it is sent. */
+  readonly onClaimed?: (task: ClaimedTask) => void;
   /** Test hook: called after every attempt. */
   readonly onAttempt?: (record: AttemptRecord) => void;
 };

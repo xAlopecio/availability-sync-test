@@ -495,4 +495,74 @@ describe('worker with a counting client (loop mechanics)', () => {
     expect(attempts[0]!.obj['nextAttemptAt']).toEqual(expect.any(String));
     expect(attempts[1]!.obj['nextAttemptAt']).toBeNull();
   });
+
+  it('L12: an unexpected throw from the client is logged; the task is retried after its lease; the loop goes on', async () => {
+    let calls = 0;
+    const client: PortalClient = {
+      async putAvailability() {
+        calls++;
+        if (calls === 1) throw new Error('boom');
+        return { kind: 'response', status: 200 };
+      },
+    };
+    const log = captureLog();
+    await acceptAll(db.pool(), [
+      {
+        accommodationId: 'acc-1001',
+        from: portalDay(1),
+        to: portalDay(1),
+        available: true,
+        pricePerNight: 1,
+      },
+    ]);
+    const { worker } = track(testWorker(db.pool(), { client, log, concurrency: 1, leaseMs: 500 }));
+    worker.start();
+    await waitUntil(allSettled(db.pool()), 15_000, 'all tasks settled');
+    expect(calls).toBe(2);
+    expect(
+      log.entries.some(
+        (e) => e.level === 'error' && e.obj['taskId'] !== undefined && /unexpected/i.test(e.msg),
+      ),
+    ).toBe(true);
+  });
+
+  it('L13: a pause that starts between claim and send stops the send; the task waits for the pause', async () => {
+    const { client, calls } = scripted([]);
+    const limiter = new SlidingWindowRateLimiter({ limit: 10, windowMs: 60_000 });
+    let paused = false;
+    await acceptAll(db.pool(), [
+      {
+        accommodationId: 'acc-1001',
+        from: portalDay(1),
+        to: portalDay(1),
+        available: true,
+        pricePerNight: 1,
+      },
+    ]);
+    const { worker } = track(
+      testWorker(db.pool(), {
+        client,
+        limiter,
+        concurrency: 1,
+        onClaimed: () => {
+          if (!paused) {
+            paused = true;
+            limiter.pauseFor(5_000); // another slot's 429 lands right now
+          }
+        },
+      }),
+    );
+    worker.start();
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(calls).toEqual([]); // nothing sent during the pause
+    const row = (
+      await db
+        .pool()
+        .query('SELECT attempts, locked_until, next_attempt_at, now() AS db_now FROM sync_tasks')
+    ).rows[0];
+    expect(row.locked_until).toBeNull();
+    expect(
+      (row.next_attempt_at as Date).getTime() - (row.db_now as Date).getTime(),
+    ).toBeGreaterThan(3_000);
+  });
 });

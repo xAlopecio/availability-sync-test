@@ -1,4 +1,6 @@
-export type AcquireResult = { readonly ok: true } | { readonly ok: false; readonly waitMs: number };
+/** `token` identifies this permit, so `release(token)` gives back exactly this one. */
+export type AcquireResult =
+  { readonly ok: true; readonly token: number } | { readonly ok: false; readonly waitMs: number };
 
 export type RateLimiterOptions = {
   /** Maximum request starts in any window. */
@@ -67,7 +69,7 @@ export class SlidingWindowRateLimiter {
     const waitMs = Math.max(pauseWait, windowWait);
     if (waitMs > 0) return { ok: false, waitMs };
     this.#starts.push(now);
-    return { ok: true };
+    return { ok: true, token: -1 }; // stub token: release() ignores it for now
   }
 
   /** Denies every permit until `until`, on the limiter's clock. Never shortens an existing pause. */
@@ -80,9 +82,19 @@ export class SlidingWindowRateLimiter {
     this.pauseUntil(this.#now() + ms);
   }
 
-  /** Gives back the most recent permit (a claim found nothing to send, SPEC D5). */
-  release(): void {
+  /** Gives back the permit identified by `token` (a claim found nothing to send, SPEC D5). */
+  release(_token?: number): void {
     this.#starts.pop();
+  }
+
+  /** Records starts made `agesMs` ago by an earlier process (read from the database, SPEC D5). */
+  seedRecent(_agesMs: readonly number[]): void {
+    throw new Error('not implemented');
+  }
+
+  /** How long the global pause still lasts, or 0. */
+  pausedRemaining(): number {
+    return 0;
   }
 
   /** Waits until a permit is free and takes it; rejects with an AbortError if `signal` aborts. */
