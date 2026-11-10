@@ -95,6 +95,7 @@ export function testWorker(
     pollMs: 100,
     timeoutMs,
     retry: { baseMs: 200, maxMs: 3_000, rateLimitMarginMs: 500 },
+    timeoutSettleMs: 3_000, // D9 on for every worker test (production: 30 s)
     ...overrides,
     onAttempt: (r) => {
       records.push(r);

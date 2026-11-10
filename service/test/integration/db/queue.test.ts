@@ -41,7 +41,7 @@ describe('claimTask', () => {
 
   it('Q2 / D6: sets the lease, increments attempts and returns everything needed to send', async () => {
     const updateId = await accept({ ...ninety, available: false, pricePerNight: 19.99 });
-    const before = Date.now();
+    const before = ((await db.pool().query('SELECT now() AS now')).rows[0].now as Date).getTime(); // DB clock
     const claimed = await claim();
     expect(claimed).toEqual({
       taskId: expect.any(Number),
@@ -145,7 +145,7 @@ describe('completeTask / rescheduleTask / failTask', () => {
     await accept();
     const claimed = (await claim())!;
     await rescheduleTask(db.pool(), claimed, {
-      at: Date.now() - 1,
+      delayMs: 0,
       error: '503 UNAVAILABLE',
       httpStatus: 503,
     });
@@ -163,10 +163,9 @@ describe('completeTask / rescheduleTask / failTask', () => {
   it('Q8: reschedule keeps it pending with the next attempt time and the error', async () => {
     await accept();
     const claimed = (await claim())!;
-    const at = Date.now() + 60_000;
     expect(
       await rescheduleTask(db.pool(), claimed, {
-        at,
+        delayMs: 60_000,
         error: 'timeout after 5000 ms',
         httpStatus: null,
       }),
@@ -178,7 +177,11 @@ describe('completeTask / rescheduleTask / failTask', () => {
       last_error: 'timeout after 5000 ms',
       last_http_status: null,
     });
-    expect(Math.abs((row.next_attempt_at as Date).getTime() - at)).toBeLessThan(5);
+    // Q14: the delay is applied on the database clock, never on the app's.
+    const dbNow = (await db.pool().query('SELECT now() AS now')).rows[0].now as Date;
+    const ahead = (row.next_attempt_at as Date).getTime() - dbNow.getTime();
+    expect(ahead).toBeGreaterThan(55_000);
+    expect(ahead).toBeLessThanOrEqual(60_000);
     expect(await claim()).toBeNull(); // not due for a minute
   });
 
@@ -206,7 +209,7 @@ describe('completeTask / rescheduleTask / failTask', () => {
     expect(current.attempt).toBe(stale.attempt + 1);
     expect(await completeTask(db.pool(), stale, { httpStatus: 200 })).toBe(false);
     expect(
-      await rescheduleTask(db.pool(), stale, { at: Date.now(), error: 'x', httpStatus: 503 }),
+      await rescheduleTask(db.pool(), stale, { delayMs: 0, error: 'x', httpStatus: 503 }),
     ).toBe(false);
     expect(await failTask(db.pool(), stale, { error: 'x', httpStatus: 404 })).toBe(false);
     expect((await task(current.taskId)).status).toBe('pending');
@@ -219,29 +222,29 @@ describe('completeTask / rescheduleTask / failTask', () => {
     const a = (await claim())!;
     const b = (await claim())!;
     await rescheduleTask(db.pool(), a, {
-      at: Date.now() + 60_000,
+      delayMs: 60_000,
       error: 'timeout after 400 ms',
       httpStatus: null,
       timedOut: true,
     });
     await rescheduleTask(db.pool(), b, {
-      at: Date.now() + 60_000,
+      delayMs: 60_000,
       error: '503 UNAVAILABLE',
       httpStatus: 503,
     });
     const timedOut = await task(a.taskId);
-    expect(Math.abs((timedOut.last_timeout_at as Date).getTime() - Date.now())).toBeLessThan(5_000);
+    const dbNow = ((await db.pool().query('SELECT now() AS now')).rows[0].now as Date).getTime();
+    expect(Math.abs((timedOut.last_timeout_at as Date).getTime() - dbNow)).toBeLessThan(5_000);
     expect((await task(b.taskId)).last_timeout_at).toBeNull();
   });
 
   it("Q13 / D9: completing a task that timed out holds its accommodation's next tasks for the settle window only", async () => {
     const timedOutUpdate = await accept({ accommodationId: 'acc-1001' });
     const held = await accept({ accommodationId: 'acc-1001' });
-    const other = await accept({ accommodationId: 'acc-1002' });
     const first = (await claim())!;
     expect(first.updateId).toBe(timedOutUpdate);
     await rescheduleTask(db.pool(), first, {
-      at: Date.now() - 1,
+      delayMs: 0,
       error: 'timeout after 400 ms',
       httpStatus: null,
       timedOut: true,
@@ -250,6 +253,8 @@ describe('completeTask / rescheduleTask / failTask', () => {
     expect(retry.taskId).toBe(first.taskId);
     expect(await completeTask(db.pool(), retry, { httpStatus: 200, settleMs: 60_000 })).toBe(true);
 
+    // Accepted only now, so the claim order above does not depend on it.
+    const other = await accept({ accommodationId: 'acc-1002' });
     const heldRow = (
       await db.pool().query('SELECT next_attempt_at FROM sync_tasks WHERE update_id = $1', [held])
     ).rows[0];

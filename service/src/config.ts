@@ -16,8 +16,12 @@ export type Config = {
     readonly apiKey: string;
     readonly maxRequestsPerMinute: number;
     readonly timeoutMs: number;
+    /** D9: hold an accommodation's next tasks this long after a timed-out attempt. */
+    readonly timeoutSettleMs: number;
   };
   readonly worker: {
+    /** `false` runs the API only (SPEC §8). */
+    readonly enabled: boolean;
     readonly concurrency: number;
     readonly leaseMs: number;
     readonly pollMs: number;
@@ -49,6 +53,16 @@ export function loadConfig(env: Env): Config {
       return fallback;
     }
     return Number(raw);
+  };
+
+  const bool = (name: string, fallback: boolean) => {
+    const raw = env[name];
+    if (raw === undefined) return fallback;
+    if (raw !== 'true' && raw !== 'false') {
+      problems.push(`${name} must be "true" or "false", got ${JSON.stringify(raw)}`);
+      return fallback;
+    }
+    return raw === 'true';
   };
 
   const url = (name: string, fallback: string, protocols: readonly string[]) => {
@@ -100,8 +114,10 @@ export function loadConfig(env: Env): Config {
       apiKey,
       maxRequestsPerMinute: int('PORTAL_MAX_REQUESTS_PER_MINUTE', 25),
       timeoutMs,
+      timeoutSettleMs: int('PORTAL_TIMEOUT_SETTLE_MS', 30000),
     },
     worker: {
+      enabled: bool('WORKER_ENABLED', true),
       concurrency: int('WORKER_CONCURRENCY', 3),
       leaseMs,
       pollMs: int('WORKER_POLL_MS', 500),

@@ -66,34 +66,76 @@ export async function claimTask(
 /** Fencing: only the claim that still owns the task (same `attempts`, still pending) may close it. */
 const OWNED = `id = $1 AND attempts = $2 AND status = 'pending'`;
 
-/** The task succeeded. Returns `false` if the token is stale (another claim owns it now). */
+/**
+ * The task succeeded. If one of its attempts had timed out, the portal may still apply that
+ * request late, so the accommodation's next tasks wait until `last_timeout_at + settleMs` (D9).
+ * Returns `false` if the token is stale (another claim owns it now).
+ */
 export async function completeTask(
   pool: pg.Pool,
   task: ClaimedTask,
   result: { httpStatus: number; settleMs?: number },
 ): Promise<boolean> {
-  const { rowCount } = await pool.query(
-    `UPDATE sync_tasks
-        SET status = 'done', completed_at = now(), locked_until = NULL,
-            last_error = NULL, last_http_status = $3
-      WHERE ${OWNED}`,
-    [task.taskId, task.attempt, result.httpStatus],
-  );
-  return rowCount === 1;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ last_timeout_at: Date | null }>(
+      `UPDATE sync_tasks
+          SET status = 'done', completed_at = now(), locked_until = NULL,
+              last_error = NULL, last_http_status = $3
+        WHERE ${OWNED}
+    RETURNING last_timeout_at`,
+      [task.taskId, task.attempt, result.httpStatus],
+    );
+    if (rows.length !== 1) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+    const timedOutAt = rows[0]!.last_timeout_at;
+    if (timedOutAt !== null && result.settleMs !== undefined) {
+      await client.query(
+        `UPDATE sync_tasks
+            SET next_attempt_at = greatest(next_attempt_at, $2::timestamptz + make_interval(secs => $3::double precision / 1000))
+          WHERE accommodation_id = $1 AND status = 'pending'`,
+        [task.accommodationId, timedOutAt, result.settleMs],
+      );
+    }
+    await client.query('COMMIT');
+    return true;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
-/** A transient failure: retry at `at` (epoch ms). Returns `false` if the token is stale. */
+/**
+ * A transient failure: retry after `delayMs`, measured on the **database clock** (`now()`), like
+ * every other time in the queue. Taking a delay rather than an absolute time means a skew
+ * between the app's and the database's clocks can never shift a retry. Returns `false` if the
+ * token is stale.
+ */
 export async function rescheduleTask(
   pool: pg.Pool,
   task: ClaimedTask,
-  result: { at: number; error: string; httpStatus: number | null; timedOut?: boolean },
+  result: { delayMs: number; error: string; httpStatus: number | null; timedOut?: boolean },
 ): Promise<boolean> {
   const { rowCount } = await pool.query(
     `UPDATE sync_tasks
-        SET next_attempt_at = to_timestamp($3::double precision / 1000), locked_until = NULL,
-            last_error = $4, last_http_status = $5
+        SET next_attempt_at = now() + make_interval(secs => $3::double precision / 1000),
+            locked_until = NULL,
+            last_error = $4, last_http_status = $5,
+            last_timeout_at = CASE WHEN $6::boolean THEN now() ELSE last_timeout_at END
       WHERE ${OWNED}`,
-    [task.taskId, task.attempt, result.at, result.error, result.httpStatus],
+    [
+      task.taskId,
+      task.attempt,
+      Math.max(0, result.delayMs),
+      result.error,
+      result.httpStatus,
+      result.timedOut ?? false,
+    ],
   );
   return rowCount === 1;
 }

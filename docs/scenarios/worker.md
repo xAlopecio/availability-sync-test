@@ -65,6 +65,7 @@ The claim query of SPEC D6 plus the three outcomes. Each claim returns a **fenci
 | Q11 / D6 | A head row locked by another transaction (a slot mid-claim) — *added after mutation testing: removing `SKIP LOCKED` survived Q4, because Postgres waits and re-evaluates* | Another accommodation's head is claimed **immediately**, not after the lock is released |
 | Q12 / D9 | `reschedule` after a **timeout** — *added after L6 exposed late application* | Records `last_timeout_at`; other outcomes do not |
 | Q13 / D9 | `complete` of a task that had a timeout — *added after L6* | The accommodation's next pending tasks are not due before `last_timeout_at + settle`; other accommodations are unaffected; a task without a timeout delays nothing |
+| Q14 / D6 | `reschedule` takes a **delay** applied on the database clock — *added after the Docker VM clock drifted 52 s behind the host (Mac sleep), which delayed every retry by 52 s* | `next_attempt_at − DB now() ≈ delay`, whatever the app's clock says |
 
 ## 4. Rate limiter additions — `src/portal/rate-limiter.ts` (U)
 

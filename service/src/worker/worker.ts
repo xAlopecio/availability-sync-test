@@ -119,12 +119,18 @@ export function createWorker(options: WorkerOptions): Worker {
     try {
       applied =
         action.type === 'complete'
-          ? await completeTask(pool, task, { httpStatus: action.httpStatus })
+          ? await completeTask(pool, task, {
+              httpStatus: action.httpStatus,
+              ...(options.timeoutSettleMs === undefined
+                ? {}
+                : { settleMs: options.timeoutSettleMs }),
+            })
           : action.type === 'reschedule'
             ? await rescheduleTask(pool, task, {
-                at: action.at,
+                delayMs: action.at - endedAt, // applied on the database clock
                 error: action.error,
                 httpStatus: action.httpStatus,
+                timedOut: action.outcome === 'timeout',
               })
             : await failTask(pool, task, { error: action.error, httpStatus: action.httpStatus });
     } catch (error) {
