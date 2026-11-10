@@ -238,9 +238,9 @@ describe('completeTask / rescheduleTask / failTask', () => {
     expect((await task(b.taskId)).last_timeout_at).toBeNull();
   });
 
-  it("Q13 / D9: completing a task that timed out holds its accommodation's next tasks for the settle window only", async () => {
+  it("Q13 / D9: after a timeout, the accommodation's overlapping tasks wait for the settle window; others don't", async () => {
     const timedOutUpdate = await accept({ accommodationId: 'acc-1001' });
-    const held = await accept({ accommodationId: 'acc-1001' });
+    const held = await accept({ accommodationId: 'acc-1001' }); // same days: overlaps
     const first = (await claim())!;
     expect(first.updateId).toBe(timedOutUpdate);
     await rescheduleTask(db.pool(), first, {
@@ -251,26 +251,53 @@ describe('completeTask / rescheduleTask / failTask', () => {
     });
     const retry = (await claim())!;
     expect(retry.taskId).toBe(first.taskId);
-    expect(await completeTask(db.pool(), retry, { httpStatus: 200, settleMs: 60_000 })).toBe(true);
-
-    // Accepted only now, so the claim order above does not depend on it.
+    expect(await completeTask(db.pool(), retry, { httpStatus: 200 })).toBe(true);
     const other = await accept({ accommodationId: 'acc-1002' });
-    const heldRow = (
-      await db.pool().query('SELECT next_attempt_at FROM sync_tasks WHERE update_id = $1', [held])
-    ).rows[0];
-    const timeoutAt = (await task(first.taskId)).last_timeout_at as Date;
-    expect((heldRow.next_attempt_at as Date).getTime()).toBeGreaterThanOrEqual(
-      timeoutAt.getTime() + 60_000 - 5,
-    );
-    expect((await claim())?.updateId).toBe(other); // the other accommodation is not held
-    expect(await claim()).toBeNull(); // acc-1001's next update waits for the settle window
+
+    const settled = { ...LEASE, settleMs: 60_000 };
+    expect((await claimTask(db.pool(), settled))?.updateId).toBe(other); // other accommodations are not held
+    expect(await claimTask(db.pool(), settled)).toBeNull(); // acc-1001's overlapping update waits
+    expect((await claimTask(db.pool(), { ...LEASE, settleMs: 0 }))?.updateId).toBe(held); // …only because of the window
+  });
+
+  it('Q15 / D9: an overlapping update accepted AFTER the timed-out task completed is held too', async () => {
+    await accept({ accommodationId: 'acc-1001' });
+    const a = (await claim())!;
+    await rescheduleTask(db.pool(), a, {
+      delayMs: 0,
+      error: 'timeout after 400 ms',
+      httpStatus: null,
+      timedOut: true,
+    });
+    expect(await completeTask(db.pool(), (await claim())!, { httpStatus: 200 })).toBe(true);
+    const correction = await accept({ accommodationId: 'acc-1001', pricePerNight: 125 }); // the manager corrects
+    expect(await claimTask(db.pool(), { ...LEASE, settleMs: 60_000 })).toBeNull();
+    expect((await claimTask(db.pool(), { ...LEASE, settleMs: 0 }))?.updateId).toBe(correction);
+  });
+
+  it('Q16 / D9: a task whose days do not overlap the timed-out one is not held', async () => {
+    await accept({ accommodationId: 'acc-1001', from: day('2026-12-01'), to: day('2026-12-07') });
+    const elsewhere = await accept({
+      accommodationId: 'acc-1001',
+      from: day('2027-01-01'),
+      to: day('2027-01-05'),
+    });
+    const a = (await claim())!;
+    await rescheduleTask(db.pool(), a, {
+      delayMs: 0,
+      error: 'timeout after 400 ms',
+      httpStatus: null,
+      timedOut: true,
+    });
+    expect(await completeTask(db.pool(), (await claim())!, { httpStatus: 200 })).toBe(true);
+    expect((await claimTask(db.pool(), { ...LEASE, settleMs: 60_000 }))?.updateId).toBe(elsewhere);
   });
 
   it('Q13 / D9: completing a task without a timeout delays nothing', async () => {
     await accept({ accommodationId: 'acc-1001' });
     const next = await accept({ accommodationId: 'acc-1001' });
     const first = (await claim())!;
-    expect(await completeTask(db.pool(), first, { httpStatus: 200, settleMs: 60_000 })).toBe(true);
-    expect((await claim())?.updateId).toBe(next);
+    expect(await completeTask(db.pool(), first, { httpStatus: 200 })).toBe(true);
+    expect((await claimTask(db.pool(), { ...LEASE, settleMs: 60_000 }))?.updateId).toBe(next);
   });
 });

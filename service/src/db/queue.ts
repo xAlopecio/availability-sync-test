@@ -17,7 +17,7 @@ export type ClaimedTask = {
 /** Claims the oldest due head-of-queue task (SPEC D1, D6), or `null` if none is claimable. */
 export async function claimTask(
   pool: pg.Pool,
-  options: { leaseMs: number },
+  options: { leaseMs: number; settleMs?: number },
 ): Promise<ClaimedTask | null> {
   // Head of queue: no pending task of the same accommodation has a lower id. A leased head stays
   // `pending`, so it keeps blocking the rest of its queue while in flight (one per accommodation).
