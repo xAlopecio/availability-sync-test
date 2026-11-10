@@ -29,6 +29,8 @@ Commands (run from `service/`):
 | `npm run check` | typecheck + lint + format check + unit tests. **Must pass before every commit.** |
 | `npm test` | Unit tests (`test/unit/`). Fast, no Docker needed. |
 | `npm run test:integration` | Integration tests (`test/integration/`) against real Portal Sol + Postgres. Slow: the portal rate-limits requests (30 req/min in the `base` variant). |
+
+Long portal-bound runs on this Mac: prefix them with `caffeinate -i`. The Mac sleeps on battery, which stalls the tests and makes the Docker VM's clock drift (52 s were seen).
 | `npm run test:e2e` | End-to-end tests (`test/e2e/`): the whole service against the real portal. |
 
 TypeScript is pinned to **5.9.x**: typescript-eslint supports TS < 6.1, so do not upgrade to TS 7.
@@ -78,7 +80,7 @@ The agent is required to find at least 3 risks, so not every risk is a real prob
 - Branches so far and planned: `feature/setup`, `feature/core`, `refactor/structure`, `feature/api`, `feature/worker`, `feature/metrics`, `feature/e2e`, `docs/process`.
 - **Merged branches are never deleted** (locally or on GitHub): they are part of the visible process.
 - Small Conventional Commits (`feat:`, `test:`, `fix:`, `refactor:`, `docs:`, `chore:`), with a scope when useful (`feat(worker): …`). In TDD, the failing test and its implementation may be separate commits.
-- Integrate through GitHub PRs into `develop` (`gh pr create --base develop`). CI (`.github/workflows/ci.yml`) runs `npm run check` and, in a second job with a PostgreSQL service, `npm run test:integration` on every PR; both must be green. The user reviews and merges.
+- Integrate through GitHub PRs into `develop` (`gh pr create --base develop`). CI (`.github/workflows/ci.yml`) runs `npm run check` and, in a second job with PostgreSQL and **Portal Sol** services, `npm run test:integration` on every PR; both must be green. The user reviews and merges.
 - **PR descriptions are detailed** (in English), with these sections:
   1. **Summary**: what the block delivers and why. Link the SPEC sections and ACs it covers.
   2. **What's included**: changes grouped by area, naming the key files.
