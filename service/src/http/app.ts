@@ -18,6 +18,8 @@ export type AppDependencies = {
   readonly workerState?: () => WorkerState;
   /** D9 settle window, used by `/metrics` to classify held tasks (default 30 s). */
   readonly timeoutSettleMs?: number;
+  /** Own timeout for the metrics' queue-state read (default 3 s, SPEC §7). */
+  readonly queueStateTimeoutMs?: number;
   /** The limiter whose state `/metrics` reports, when this instance runs the worker. */
   readonly limiter?: { pausedRemaining(): number; windowStarts(): number };
 };

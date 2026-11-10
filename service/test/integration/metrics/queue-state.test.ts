@@ -137,4 +137,44 @@ describe('queue state at scrape', () => {
     expect(ready).toBe(4); // acc-1001, -1003, -1004, -1005 heads; -1002 not due; -1006 held
     expect(claimed).toBe(ready);
   });
+
+  it('Q7: when a read fails after a good one, the last good values are served with their age', async () => {
+    await accept('acc-1001');
+    expect(await pendingByState()).toMatchObject({ ready: 1 });
+    await sql('ALTER TABLE updates RENAME TO updates_hidden'); // the next read fails
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      const { samples } = await scrape();
+      expect(samples.filter((x) => x.name === 'sync_metrics_db_up').map((x) => x.value)).toEqual([
+        0,
+      ]);
+      expect(valueOf(samples, 'sync_tasks_pending', { state: 'ready' })).toBe(1); // last good value
+      expect(valueOf(samples, 'sync_queue_state_age_seconds')).toBeGreaterThanOrEqual(1);
+    } finally {
+      await sql('ALTER TABLE updates_hidden RENAME TO updates');
+    }
+    const fresh = (await scrape()).samples;
+    expect(valueOf(fresh, 'sync_queue_state_age_seconds')).toBe(0);
+  });
+
+  it('Q7: the read has its own timeout; with no earlier good read the gauges are absent', async () => {
+    await accept('acc-1001');
+    const slow = buildApp({
+      pool: db.pool(),
+      maxUpdateRangeDays: 366,
+      logger: false,
+      queueStateTimeoutMs: 1,
+    });
+    try {
+      const { types, samples } = parseExposition(
+        (await slow.inject({ method: 'GET', url: '/metrics' })).body,
+      );
+      expect(samples.filter((x) => x.name === 'sync_metrics_db_up').map((x) => x.value)).toEqual([
+        0,
+      ]);
+      expect(types.has('sync_tasks_pending')).toBe(false);
+    } finally {
+      await slow.close();
+    }
+  });
 });
