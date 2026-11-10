@@ -91,7 +91,7 @@ The claim query of SPEC D6 plus the three outcomes. Each claim returns a **fenci
 | L9 | `stop()` while slots are waiting for a permit and one request is in flight | Waiting slots stop promptly (abort); the in-flight request finishes and its outcome is stored; `stop()` resolves; no claim afterwards |
 | L10 (I-db + fake client) | An idle worker with an empty queue for several poll intervals | **Consumes no permits** (the limiter still has its full window); no portal calls |
 | L11 (I-db + fake client) | Every attempt is logged | JSON line with `taskId`, `updateId`, `accommodationId`, `attempt`, `outcome`, `httpStatus`, `durationMs`, `nextAttemptAt` (SPEC §7); retries at `warn`, permanent failures at `error` |
-| L6 note / D9 | L6 failed intermittently: a timed-out PUT was applied **after** the next update (reproduced outside the tests, 1 in 14). With the settle window (short in the test), it must converge on every run. Worker tests also wait for the portal to go quiet before the next test's reset, because timed-out requests from one test could still be in flight in the next |
+| L6 note / D9 | L6 failed intermittently: a timed-out PUT was applied **after** the next update (reproduced outside the tests, 1 in 14). With the settle window it must converge on every run. *A 3 s test window still failed once in five runs: diagnostics showed a late write landing ≥ 5 s after we gave up (an abandoned PUT is applied later, or never: 3 of 25). The test window is now 15 s (production: 30 s); 8 out of 8 runs and repeated full-suite runs passed.* Worker tests also wait for the portal to go quiet before the next test's reset, because timed-out requests from one test could still be in flight in the next |
 
 ## 6. Wiring — `src/main.ts` (I-portal)
 
