@@ -22,7 +22,8 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "npm run typecheck && npm run lint && npm run format:check && npm test"
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm test",
+    "test:alerts": "docker run --rm -v \"$PWD/../ops:/ops:ro\" --entrypoint /bin/promtool prom/prometheus:v2.55.1 test rules /ops/alerts.test.yml"
   },
   "dependencies": {
     "fastify": "^5.12.8",
