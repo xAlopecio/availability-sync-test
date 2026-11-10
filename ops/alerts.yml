@@ -1,6 +1,8 @@
 # Prometheus alerting rules for the availability sync service (SPEC §7).
 # DB-derived gauges are reported identically by every instance: aggregate them with max().
-# Counters are per process: aggregate them with sum().
+# Counters are per process: aggregate them with sum(). Every documented label value starts at 0
+# (otherwise increase()/rate() would miss the first event after a restart).
+# Behaviour tests: alerts.test.yml (npm run test:alerts in service/).
 groups:
   - name: availability-sync
     rules:
@@ -19,8 +21,18 @@ groups:
         annotations:
           summary: Work is pending but no instance holds the worker lock (all disabled or standby).
 
+      - alert: ServiceMetricsAbsent
+        expr: absent(sync_worker_active)
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: No instance of the sync service exposes metrics (down, crash-looping or not scraped).
+
       - alert: WorkerNotSending
-        expr: max(sync_tasks_pending{state="ready"}) > 0 and sum(rate(portal_requests_total[5m])) == 0
+        # Not during a Retry-After pause: that silence is by design (RateLimiterPausedLong covers it).
+        expr: |
+          (max(sync_tasks_pending{state="ready"}) > 0 and sum(rate(portal_requests_total[5m])) == 0)
+            unless max(portal_rate_limiter_paused_seconds) > 0
         for: 5m
         labels: { severity: critical }
         annotations:
@@ -38,6 +50,12 @@ groups:
         labels: { severity: critical }
         annotations:
           summary: The service cannot read its database; the queue gauges are missing.
+
+      - alert: QueueGaugesStale
+        expr: max(sync_queue_state_age_seconds) > 120
+        labels: { severity: warning }
+        annotations:
+          summary: The queue gauges are served from a read more than 2 minutes old (the read keeps failing or timing out).
 
       - alert: StuckAccommodation
         expr: max(sync_stuck_heads) > 0

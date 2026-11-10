@@ -115,6 +115,7 @@ describe('ops/alerts.yml', () => {
       'sync_stuck_heads',
       'sync_head_attempts_max',
       'sync_metrics_db_up',
+      'sync_queue_state_age_seconds',
     ];
     const { types } = await expose();
     const known = new Set([...types.keys(), ...dbGauges]);
