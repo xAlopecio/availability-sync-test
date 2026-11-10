@@ -45,6 +45,7 @@ A single aggregate query per scrape. Every pending task falls into exactly one s
 | Q3 | Nothing pending | Every state `0`; oldest age `0` |
 | Q4 | **Stuck heads** (deferred from the worker review): heads with many attempts | `sync_stuck_heads{min_attempts="10"}` (the number of accommodations whose head has ≥ 10 attempts), plus `sync_head_attempts_max` |
 | Q5 | The database is unreachable during a scrape | `/metrics` still answers `200` with the process counters; `sync_metrics_db_up 0`; the DB-derived gauges are **absent**, not reported as a false 0 |
+| Q6 | `ready` vs the claim query — *added while implementing: the metrics and `claimTask` implement the same rules in two places, so they could drift* | The number of `ready` tasks equals the number `claimTask` can actually claim |
 
 ## 3. Instrumentation of the worker and the API — `src/worker/worker.ts`, `src/http/routes/updates.ts` (I-db + scripted client)
 

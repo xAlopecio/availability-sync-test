@@ -1,5 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
+import { Registry } from 'prom-client';
+import { queueStateRegistry, readQueueState, type QueueState } from '../../metrics/queue-state.ts';
 import type { Metrics } from '../../metrics/registry.ts';
 import { errorBody } from '../errors.ts';
 
@@ -11,12 +13,19 @@ export function registerObservabilityRoutes(
     readonly pool: pg.Pool;
     readonly metrics: Metrics;
     readonly workerState: () => WorkerState;
+    /** D9 settle window, to classify held tasks the way the claim does. */
+    readonly settleMs: number;
   },
 ): void {
-  app.get('/metrics', async (_request, reply) => {
-    return reply
-      .header('content-type', deps.metrics.registry.contentType)
-      .send(await deps.metrics.registry.metrics());
+  app.get('/metrics', async (request, reply) => {
+    let state: QueueState | null = null;
+    try {
+      state = await readQueueState(deps.pool, deps.settleMs);
+    } catch (error) {
+      request.log.warn({ err: error }, 'metrics: could not read the queue state');
+    }
+    const merged = Registry.merge([deps.metrics.registry, queueStateRegistry(state)]);
+    return reply.header('content-type', merged.contentType).send(await merged.metrics());
   });
 
   // Liveness: the process serves HTTP. Never depends on the database, because restarting the

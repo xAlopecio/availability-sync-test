@@ -16,6 +16,8 @@ export type AppDependencies = {
   readonly metrics?: Metrics;
   /** What `/ready` reports about the worker; `disabled` if not given. */
   readonly workerState?: () => WorkerState;
+  /** D9 settle window, used by `/metrics` to classify held tasks (default 30 s). */
+  readonly timeoutSettleMs?: number;
 };
 
 /** Builds the HTTP app without listening, so tests can drive it with `inject()`. */
@@ -37,6 +39,7 @@ export function buildApp(deps: AppDependencies): FastifyInstance {
     pool: deps.pool,
     metrics: deps.metrics ?? createMetrics(),
     workerState: deps.workerState ?? (() => 'disabled'),
+    settleMs: deps.timeoutSettleMs ?? 30_000,
   });
   return app;
 }

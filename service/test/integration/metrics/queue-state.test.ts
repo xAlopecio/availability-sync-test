@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createPool } from '#src/db/pool.ts';
+import { claimTask } from '#src/db/queue.ts';
 import { acceptUpdate } from '#src/db/repository.ts';
 import { buildApp } from '#src/http/app.ts';
 import { useApp } from '../../support/app.ts';
@@ -115,5 +116,25 @@ describe('queue state at scrape', () => {
       await dead.close();
       await pool.end();
     }
+  });
+
+  it('Q6: "ready" agrees with the claim query (two implementations of the same rules)', async () => {
+    for (const acc of ['acc-1001', 'acc-1002', 'acc-1003', 'acc-1004', 'acc-1005']) {
+      await accept(acc);
+      await accept(acc);
+    }
+    const [, held] = [await accept('acc-1006'), await accept('acc-1006')];
+    await sql(
+      "UPDATE sync_tasks SET next_attempt_at = now() + interval '1 hour' WHERE accommodation_id = 'acc-1002'",
+    );
+    await sql(
+      "UPDATE sync_tasks SET status = 'done', completed_at = now(), last_timeout_at = now() WHERE accommodation_id = 'acc-1006' AND update_id <> $1",
+      [held],
+    );
+    const ready = (await pendingByState())['ready'];
+    let claimed = 0;
+    while (await claimTask(db.pool(), { leaseMs: 30_000, settleMs: 30_000 })) claimed++;
+    expect(ready).toBe(4); // acc-1001, -1003, -1004, -1005 heads; -1002 not due; -1006 held
+    expect(claimed).toBe(ready);
   });
 });
