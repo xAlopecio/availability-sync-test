@@ -163,17 +163,26 @@ describe('queue state at scrape', () => {
       pool: db.pool(),
       maxUpdateRangeDays: 366,
       logger: false,
-      queueStateTimeoutMs: 1,
+      queueStateTimeoutMs: 200,
     });
+    const blocker = await db.pool().connect();
     try {
+      // Hold the table so the read blocks: only its own 200 ms timeout can end it (the pool's
+      // statement_timeout is 10 s, so a pass here proves the dedicated timeout is applied).
+      await blocker.query('BEGIN');
+      await blocker.query('LOCK TABLE updates IN ACCESS EXCLUSIVE MODE');
+      const started = Date.now();
       const { types, samples } = parseExposition(
         (await slow.inject({ method: 'GET', url: '/metrics' })).body,
       );
+      expect(Date.now() - started).toBeLessThan(2_000);
       expect(samples.filter((x) => x.name === 'sync_metrics_db_up').map((x) => x.value)).toEqual([
         0,
       ]);
       expect(types.has('sync_tasks_pending')).toBe(false);
     } finally {
+      await blocker.query('ROLLBACK');
+      blocker.release();
       await slow.close();
     }
   });

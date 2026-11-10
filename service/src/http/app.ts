@@ -46,6 +46,9 @@ export function buildApp(deps: AppDependencies): FastifyInstance {
     workerState: deps.workerState ?? (() => 'disabled'),
     settleMs: deps.timeoutSettleMs ?? 30_000,
     ...(deps.limiter ? { limiter: deps.limiter } : {}),
+    ...(deps.queueStateTimeoutMs === undefined
+      ? {}
+      : { queueStateTimeoutMs: deps.queueStateTimeoutMs }),
   });
   return app;
 }

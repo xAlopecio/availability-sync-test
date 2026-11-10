@@ -16,20 +16,36 @@ export function registerObservabilityRoutes(
     /** D9 settle window, to classify held tasks the way the claim does. */
     readonly settleMs: number;
     readonly limiter?: { pausedRemaining(): number; windowStarts(): number };
+    readonly queueStateTimeoutMs?: number;
   },
 ): void {
+  /** Last good queue state, served (with its age) when a read fails. */
+  let lastGood: { state: QueueState; at: number } | undefined;
+
   app.get('/metrics', async (request, reply) => {
     const { metrics } = deps;
     metrics.workerActive.set(deps.workerState() === 'active' ? 1 : 0);
     metrics.limiterPausedSeconds.set((deps.limiter?.pausedRemaining() ?? 0) / 1000);
     metrics.limiterWindowStarts.set(deps.limiter?.windowStarts() ?? 0);
-    let state: QueueState | null = null;
+    let readNow = true;
     try {
-      state = await readQueueState(deps.pool, deps.settleMs);
+      lastGood = {
+        state: await readQueueState(deps.pool, deps.settleMs, deps.queueStateTimeoutMs),
+        at: Date.now(),
+      };
     } catch (error) {
-      request.log.warn({ err: error }, 'metrics: could not read the queue state');
+      readNow = false;
+      request.log.warn(
+        { err: error },
+        'metrics: could not read the queue state; serving the last good one',
+      );
     }
-    const merged = Registry.merge([deps.metrics.registry, queueStateRegistry(state)]);
+    const ageSeconds = lastGood ? (Date.now() - lastGood.at) / 1000 : 0;
+    const db = queueStateRegistry(lastGood?.state ?? null, {
+      readNow,
+      ageSeconds: readNow ? 0 : ageSeconds,
+    });
+    const merged = Registry.merge([deps.metrics.registry, db]);
     return reply.header('content-type', merged.contentType).send(await merged.metrics());
   });
 

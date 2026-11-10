@@ -24,9 +24,20 @@ export type QueueState = {
  * accommodation → queued; not due → waiting for a retry; held by an overlapping recent timeout →
  * held_settle; otherwise it would be claimed now.
  */
-export async function readQueueState(pool: pg.Pool, settleMs: number): Promise<QueueState> {
-  const { rows } = await pool.query(
-    `WITH p AS (
+export async function readQueueState(
+  pool: pg.Pool,
+  settleMs: number,
+  timeoutMs = 3_000,
+): Promise<QueueState> {
+  // Its own, shorter timeout: a slow read during a big backlog must degrade to a stale value,
+  // not hold a pool connection for the full statement_timeout (metrics review).
+  const client = await pool.connect();
+  let rows;
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(timeoutMs))}`);
+    ({ rows } = await client.query(
+      `WITH p AS (
        SELECT t.id, t.accommodation_id, t.date_from, t.date_to, t.attempts, t.next_attempt_at,
               t.locked_until, u.accepted_at,
               -- Head of its accommodation's queue: the lowest pending id (one pass, no subquery per row).
@@ -54,8 +65,15 @@ export async function readQueueState(pool: pg.Pool, settleMs: number): Promise<Q
             count(*) FILTER (WHERE is_head AND attempts >= $2) AS stuck_heads,
             coalesce(max(attempts) FILTER (WHERE is_head), 0) AS head_attempts_max
        FROM s`,
-    [settleMs, STUCK_HEAD_ATTEMPTS],
-  );
+      [settleMs, STUCK_HEAD_ATTEMPTS],
+    ));
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
   const row = rows[0];
   return {
     pending: {
@@ -76,15 +94,23 @@ export async function readQueueState(pool: pg.Pool, settleMs: number): Promise<Q
  * are absent (prom-client always prints an unlabelled gauge, even after reset(), so a long-lived
  * gauge would report a false 0).
  */
-export function queueStateRegistry(state: QueueState | null): Registry {
+export function queueStateRegistry(
+  state: QueueState | null,
+  options: { readNow: boolean; ageSeconds: number },
+): Registry {
   const registry = new Registry();
   const registers = [registry];
   new Gauge({
     name: 'sync_metrics_db_up',
-    help: '1 if the queue gauges could be read from the database at this scrape.',
+    help: '1 if the queue state could be read from the database at this scrape.',
     registers,
-  }).set(state === null ? 0 : 1);
+  }).set(options.readNow ? 1 : 0);
   if (state === null) return registry;
+  new Gauge({
+    name: 'sync_queue_state_age_seconds',
+    help: 'Age of the queue gauges: 0 when read at this scrape, else since the last good read.',
+    registers,
+  }).set(options.ageSeconds);
 
   const pending = new Gauge({
     name: 'sync_tasks_pending',
