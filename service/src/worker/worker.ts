@@ -35,7 +35,7 @@ export type WorkerOptions = {
   readonly leaseMs: number;
   readonly pollMs: number;
   readonly timeoutMs: number;
-  /** D9: after a timeout, how long the accommodation's next tasks wait once it completes. */
+  /** D9: after a timeout, how long overlapping tasks of that accommodation stay unclaimable. */
   readonly timeoutSettleMs?: number;
   readonly retry: RetryPolicy;
   readonly random?: () => number;
@@ -73,7 +73,10 @@ export function createWorker(options: WorkerOptions): Worker {
       }
       let task: ClaimedTask | null;
       try {
-        task = await claimTask(pool, { leaseMs });
+        task = await claimTask(pool, {
+          leaseMs,
+          ...(options.timeoutSettleMs === undefined ? {} : { settleMs: options.timeoutSettleMs }),
+        });
       } catch (error) {
         limiter.release();
         log.warn(
@@ -119,12 +122,7 @@ export function createWorker(options: WorkerOptions): Worker {
     try {
       applied =
         action.type === 'complete'
-          ? await completeTask(pool, task, {
-              httpStatus: action.httpStatus,
-              ...(options.timeoutSettleMs === undefined
-                ? {}
-                : { settleMs: options.timeoutSettleMs }),
-            })
+          ? await completeTask(pool, task, { httpStatus: action.httpStatus })
           : action.type === 'reschedule'
             ? await rescheduleTask(pool, task, {
                 delayMs: action.at - endedAt, // applied on the database clock
