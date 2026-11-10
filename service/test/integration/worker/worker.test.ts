@@ -227,15 +227,54 @@ describe('worker against the real Portal Sol', () => {
       pricePerNight: 300 + i,
     }));
     await acceptAll(db.pool(), changes);
-    // A short settle window (D9) keeps the test fast; production uses 30 s.
+    // D9 window shorter than production (30 s) but above the measured late-application delay
+    // (≥ 5 s seen): 3 s was too short and let a late write through (diagnosed run).
     const { worker, records } = track(
-      testWorker(db.pool(), { timeoutMs: 400, timeoutSettleMs: 3_000 }),
+      testWorker(db.pool(), { timeoutMs: 400, timeoutSettleMs: 15_000 }),
     );
     worker.start();
     await waitUntil(allSettled(db.pool()), 240_000, 'all tasks settled');
     expect(records.filter((r) => r.action.outcome === 'timeout').length).toBeGreaterThan(0); // timeouts happened
     expect(await statuses()).toEqual([{ status: 'done', n: 6 }]);
-    await assertPortalMatches(changes, 'acc-1004');
+    try {
+      await assertPortalMatches(changes, 'acc-1004');
+    } catch (error) {
+      // Diagnostics for an intermittent failure: what the portal received vs what the worker did.
+      const puts = (await portalRequests()).filter((r) => r.method === 'PUT');
+      console.error(
+        'L6 portal log:\n' +
+          puts
+            .map(
+              (r) =>
+                `${r.id} ${r.timestamp} price=${r.body?.['pricePerNight']} status=${r.status} server=${r.durationMs}ms${r.clientDisconnected ? ' DISCONNECTED' : ''}`,
+            )
+            .join('\n'),
+      );
+      console.error(
+        'L6 worker attempts:\n' +
+          records
+            .map(
+              (r) =>
+                `${new Date(r.startedAt).toISOString()} → +${r.endedAt - r.startedAt}ms price=${r.task.pricePerNight} task=${r.task.taskId}#${r.task.attempt} ${r.action.outcome}`,
+            )
+            .join('\n'),
+      );
+      const settle = (
+        await db
+          .pool()
+          .query('SELECT id, last_timeout_at, completed_at FROM sync_tasks ORDER BY id')
+      ).rows;
+      console.error(
+        'L6 tasks:\n' +
+          settle
+            .map(
+              (t) =>
+                `${t.id} timeout=${t.last_timeout_at?.toISOString()} done=${t.completed_at?.toISOString()}`,
+            )
+            .join('\n'),
+      );
+      throw error;
+    }
   });
 
   it('L7 / AC9: an unknown accommodation fails on its 404, is never retried after it, and blocks nothing', async () => {
@@ -282,14 +321,19 @@ describe('worker against the real Portal Sol', () => {
       expect(t.last_error).toMatch(/^404 NOT_FOUND/);
     }
     expect(tasks.filter((t) => t.status === 'done')).toHaveLength(2);
-    // No request for acc-9999 after a 404: only 503s may precede each 404.
+    // No request for acc-9999 after a 404. Before each 404 only transient failures may appear:
+    // 503s, and requests we abandoned on a timeout (the portal's documented slowness, seen > 5 s),
+    // which the portal logs with status null.
     const missingPuts = (await portalRequests()).filter((r) => r.path.includes('/acc-9999/'));
     expect(missingPuts.filter((r) => r.status === 404)).toHaveLength(2); // one per failed update
     const lastNotFound = missingPuts.map((r) => r.status).lastIndexOf(404);
     expect(missingPuts.slice(lastNotFound + 1)).toEqual([]);
     expect(
       missingPuts
-        .filter((r) => r.status !== 404 && r.status !== 503)
+        .filter(
+          (r) =>
+            r.status !== 404 && r.status !== 503 && !(r.status === null && r.clientDisconnected),
+        )
         .map((r) => ({
           id: r.id,
           at: r.timestamp,

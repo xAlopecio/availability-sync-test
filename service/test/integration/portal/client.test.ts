@@ -26,16 +26,22 @@ const body = (offset: number, pricePerNight = 177.5) => ({
 });
 const statusOf = (call: Awaited<ReturnType<ReturnType<typeof real>['putAvailability']>>) =>
   call.kind === 'response' ? call.status : -1;
+/**
+ * Repeats a real-portal call while it fails transiently: random 503s, and the portal's
+ * documented slow responses (seen: > 5 s), which the client reports as timeouts.
+ */
+const untilAnswered = async (call: () => ReturnType<ReturnType<typeof real>['putAvailability']>) =>
+  retryOn503(async () => {
+    const c = await call();
+    return Object.assign(c, { status: c.kind === 'timeout' ? 503 : statusOf(c) });
+  });
 
 describe('portal client against the real Portal Sol', () => {
   beforeEach(resetPortal);
 
   it('PC1: a valid PUT answers 200 and changes the portal state', async () => {
     const client = real();
-    const call = await retryOn503(async () => {
-      const c = await client.putAvailability('acc-1003', body(5));
-      return Object.assign(c, { status: statusOf(c) });
-    });
+    const call = await untilAnswered(() => client.putAvailability('acc-1003', body(5)));
     expect(call).toMatchObject({ kind: 'response', status: 200 });
     const days = await portalDays('acc-1003', portalDay(5), portalDay(6));
     expect(days.map((d) => [d.available, d.pricePerNight])).toEqual([
@@ -46,10 +52,7 @@ describe('portal client against the real Portal Sol', () => {
 
   it('PC2: sends only the four documented fields to the documented path', async () => {
     const client = real();
-    await retryOn503(async () => {
-      const c = await client.putAvailability('acc-1003', body(5));
-      return { status: statusOf(c) };
-    });
+    await untilAnswered(() => client.putAvailability('acc-1003', body(5)));
     const puts = (await portalRequests()).filter((r) => r.method === 'PUT');
     expect(puts.at(-1)).toMatchObject({
       path: '/api/v1/accommodations/acc-1003/availability',
@@ -65,10 +68,7 @@ describe('portal client against the real Portal Sol', () => {
 
   it("PC3: an unknown accommodation is 404 with the portal's code and message", async () => {
     const client = real();
-    const call = await retryOn503(async () => {
-      const c = await client.putAvailability('acc-9999', body(5));
-      return Object.assign(c, { status: statusOf(c) });
-    });
+    const call = await untilAnswered(() => client.putAvailability('acc-9999', body(5)));
     expect(call).toMatchObject({
       kind: 'response',
       status: 404,
@@ -78,10 +78,7 @@ describe('portal client against the real Portal Sol', () => {
 
   it('PC4: a wrong API key is 401 UNAUTHORIZED', async () => {
     const client = real({ apiKey: 'wrong-key' });
-    const call = await retryOn503(async () => {
-      const c = await client.putAvailability('acc-1003', body(5));
-      return Object.assign(c, { status: statusOf(c) });
-    });
+    const call = await untilAnswered(() => client.putAvailability('acc-1003', body(5)));
     expect(call).toMatchObject({
       kind: 'response',
       status: 401,

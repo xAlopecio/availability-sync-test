@@ -46,5 +46,10 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // Tests may print diagnostics for intermittent failures; production code must use the logger.
+    files: ['test/**/*.ts'],
+    rules: { 'no-console': 'off' },
+  },
   prettier,
 );
