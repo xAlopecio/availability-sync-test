@@ -167,3 +167,14 @@ Legend: 🤖 delegated to the AI · 👤 decided or done by the author · ⚠️
 - 🔍 **R1 (AC13) cross-checks the metrics against reality:** after a run against the real portal, the calls we count equal the PUTs in the portal's own log, 503s included.
 - 🔍 Mutation checks on the instrumentation: the lag on every chunk, uncounted failed siblings and counted replays are each caught (W3, W4, W6).
 - ⚠️ Several scripted edits stopped on their own match checks (Prettier reflowed lines, or a regex hit a parenthesis). Nothing was applied silently; each was redone on the real text. The lesson from Phase 3 (assert every replacement) paid off.
+- 🔍 **Review of the block (`deep`): `PROCEED`, conditional.** Root risk: **the alerting layer read missing data as healthy.** The reviewer measured the scrape cost with a load script and checked the PromQL against Prometheus semantics.
+  - ⚠️🔍 Labelled counters only appeared at their first increment. So `WorkerNotSending` **could never fire after a restart**, and one-shot `increase() > 0` alerts missed the first event (Prometheus does not count a series' first sample). Fixed by initialising every documented label value at 0 (M5). `promtool` test A4b now documents the failure mode.
+  - ⚠️🔍 No rule fired when the whole service was absent; `ServiceMetricsAbsent` was added. `WorkerNotSending` would have paged during a legitimate long `Retry-After`; it is now suppressed while the limiter is paused.
+  - 👤 The author chose **rule behaviour tests with `promtool`** (pinned Docker image, locally and in a new CI job): A2–A6. Two of them failed against the original rules (A3, A5), so the tests caught real bugs.
+  - 🔍 **Scrape cost** (the reviewer's load script, 50k pending / 400k done): 1.3 s → 0.89 s with a partial index → **0.22 s** with a window function for the queue head and a lazily evaluated D9 check. 👤 The author chose a dedicated 3 s timeout plus the last good value with its age (Q7). The Q7 timeout test first used 1 ms, which a tiny query beats; it now blocks the read with a table lock.
+  - Also fixed:
+    - the D9 predicate is now shared by the claim and the metrics, so they cannot drift;
+    - a failing lag lookup no longer throws into the slot loop (W10);
+    - stale results and 503s are counted (W9, W11);
+    - rejection codes are typed.
+  - Accepted: SyncStuck and StuckAccommodation overlap in severity; one extra lag query per completion.
