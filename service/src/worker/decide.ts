@@ -1,14 +1,12 @@
 import { DEFAULT_RETRY_POLICY, nextAttemptAt, type RetryPolicy } from '../domain/retry/backoff.ts';
 import {
   classifyOutcome,
-  type PortalCallResult,
+  type ObservedCall,
   type TransientReason,
 } from '../domain/retry/outcome.ts';
 
-/** What the portal client observed, including the portal's error body when there is one. */
-export type ObservedCall = PortalCallResult & {
-  readonly portalError?: { readonly code: string | null; readonly message: string | null };
-};
+/** Re-exported for the worker's callers; the type lives in the domain (the client uses it too). */
+export type { ObservedCall } from '../domain/retry/outcome.ts';
 
 export type AttemptAction =
   | { readonly type: 'complete'; readonly outcome: 'success'; readonly httpStatus: number }

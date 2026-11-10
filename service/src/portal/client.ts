@@ -1,4 +1,4 @@
-import type { ObservedCall } from '../worker/decide.ts';
+import type { ObservedCall } from '../domain/retry/outcome.ts';
 
 export type AvailabilityPut = {
   readonly from: string;

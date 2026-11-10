@@ -4,6 +4,11 @@ export type PortalCallResult =
   | { readonly kind: 'timeout' }
   | { readonly kind: 'network_error'; readonly code?: string };
 
+/** A call result plus the portal's error body when there is one (SPEC §5 error formats). */
+export type ObservedCall = PortalCallResult & {
+  readonly portalError?: { readonly code: string | null; readonly message: string | null };
+};
+
 /** Values of the `outcome` label of `portal_requests_total` (SPEC §7). */
 export type TransientReason =
   | 'rate_limited'

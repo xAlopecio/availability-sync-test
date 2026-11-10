@@ -40,8 +40,9 @@ export class SlidingWindowRateLimiter {
   readonly #windowMs: number;
   readonly #now: () => number;
   readonly #sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
-  /** Start times still inside the window, oldest first. */
-  #starts: number[] = [];
+  /** Starts still inside the window, oldest first; `token` lets release() find its own permit. */
+  #starts: { at: number; token: number }[] = [];
+  #nextToken = 1;
   #pausedUntil = 0;
 
   constructor(options: RateLimiterOptions) {
@@ -61,15 +62,17 @@ export class SlidingWindowRateLimiter {
   /** Takes a permit if one is free at `now`; otherwise says how long to wait. Pure, no timers. */
   tryAcquire(now: number): AcquireResult {
     // A start at t occupies (t − window, t], so it leaves the window exactly at t + window.
-    while (this.#starts.length > 0 && this.#starts[0]! <= now - this.#windowMs)
+    while (this.#starts.length > 0 && this.#starts[0]!.at <= now - this.#windowMs) {
       this.#starts.shift();
+    }
     const pauseWait = this.#pausedUntil - now;
     const windowWait =
-      this.#starts.length >= this.#limit ? this.#starts[0]! + this.#windowMs - now : 0;
+      this.#starts.length >= this.#limit ? this.#starts[0]!.at + this.#windowMs - now : 0;
     const waitMs = Math.max(pauseWait, windowWait);
     if (waitMs > 0) return { ok: false, waitMs };
-    this.#starts.push(now);
-    return { ok: true, token: -1 }; // stub token: release() ignores it for now
+    const token = this.#nextToken++;
+    this.#starts.push({ at: now, token });
+    return { ok: true, token };
   }
 
   /** Denies every permit until `until`, on the limiter's clock. Never shortens an existing pause. */
@@ -82,28 +85,37 @@ export class SlidingWindowRateLimiter {
     this.pauseUntil(this.#now() + ms);
   }
 
-  /** Gives back the permit identified by `token` (a claim found nothing to send, SPEC D5). */
-  release(_token?: number): void {
-    this.#starts.pop();
+  /** How long the global pause still lasts, or 0. */
+  pausedRemaining(): number {
+    return Math.max(0, this.#pausedUntil - this.#now());
+  }
+
+  /**
+   * Gives back the permit identified by `token` (a claim found nothing to send, SPEC D5). Popping
+   * the newest start instead could return another slot's permit and allow N + 1 in a window.
+   */
+  release(token: number): void {
+    const index = this.#starts.findIndex((start) => start.token === token);
+    if (index >= 0) this.#starts.splice(index, 1);
   }
 
   /** Records starts made `agesMs` ago by an earlier process (read from the database, SPEC D5). */
-  seedRecent(_agesMs: readonly number[]): void {
-    throw new Error('not implemented');
+  seedRecent(agesMs: readonly number[]): void {
+    const now = this.#now();
+    for (const age of agesMs) this.#starts.push({ at: now - age, token: this.#nextToken++ });
+    this.#starts.sort((a, b) => a.at - b.at);
   }
 
-  /** How long the global pause still lasts, or 0. */
-  pausedRemaining(): number {
-    return 0;
-  }
-
-  /** Waits until a permit is free and takes it; rejects with an AbortError if `signal` aborts. */
-  async acquire(options: { signal?: AbortSignal } = {}): Promise<void> {
+  /**
+   * Waits until a permit is free and takes it; resolves with its token. Rejects with an
+   * AbortError if `signal` aborts.
+   */
+  async acquire(options: { signal?: AbortSignal } = {}): Promise<number> {
     const { signal } = options;
     for (;;) {
       if (signal?.aborted) throw abortError();
       const result = this.tryAcquire(this.#now());
-      if (result.ok) return;
+      if (result.ok) return result.token;
       await this.#sleep(Math.min(result.waitMs, MAX_SLEEP_MS), signal);
     }
   }

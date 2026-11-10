@@ -10,6 +10,7 @@ import {
 import type { PortalClient } from '../portal/client.ts';
 import type { SlidingWindowRateLimiter } from '../portal/rate-limiter.ts';
 import { decideAttempt, type AttemptAction, type ObservedCall } from './decide.ts';
+import { sleepUnlessAborted } from './sleep.ts';
 
 /** The subset of pino's API the worker logs with (Fastify's `app.log` satisfies it). */
 export type WorkerLog = {
@@ -58,18 +59,13 @@ export function createWorker(options: WorkerOptions): Worker {
   const stopping = new AbortController();
   let slots: Promise<void>[] = [];
 
-  const pause = (ms: number) =>
-    new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, ms);
-      stopping.signal.addEventListener('abort', () => (clearTimeout(timer), resolve()), {
-        once: true,
-      });
-    });
+  const pause = (ms: number) => sleepUnlessAborted(ms, stopping.signal);
 
   async function runSlot(slot: number): Promise<void> {
     while (!stopping.signal.aborted) {
+      let permit: number;
       try {
-        await limiter.acquire({ signal: stopping.signal });
+        permit = await limiter.acquire({ signal: stopping.signal });
       } catch {
         return; // aborted by stop()
       }
@@ -80,7 +76,7 @@ export function createWorker(options: WorkerOptions): Worker {
           ...(options.timeoutSettleMs === undefined ? {} : { settleMs: options.timeoutSettleMs }),
         });
       } catch (error) {
-        limiter.release();
+        limiter.release(permit);
         log.warn(
           { err: error, slot },
           'worker could not claim a task; retrying after the poll interval',
@@ -89,17 +85,43 @@ export function createWorker(options: WorkerOptions): Worker {
         continue;
       }
       if (task === null) {
-        // Nothing to send: give the permit back so an idle worker uses no quota (SPEC D5).
-        limiter.release();
+        // Nothing to send: give this slot's permit back so an idle worker uses no quota (SPEC D5).
+        limiter.release(permit);
         await pause(pollMs);
         continue;
       }
       // Not aborted by stop(): an in-flight attempt finishes and its outcome is stored.
-      await attempt(task);
+      try {
+        await attempt(task);
+      } catch (error) {
+        // Anything unexpected (a bug, a client that throws): never an unhandled rejection that
+        // kills the process. The lease expires and the task is retried (idempotent PUT).
+        log.error(
+          { err: error, slot, taskId: task.taskId, accommodationId: task.accommodationId },
+          'unexpected error in a worker slot; the task will be retried when its lease expires',
+        );
+        await pause(pollMs);
+      }
     }
   }
 
   async function attempt(task: ClaimedTask): Promise<void> {
+    options.onClaimed?.(task);
+    // Another slot may have hit a 429 while this one was claiming: its permit predates the pause,
+    // but nothing may reach the portal before Retry-After (SPEC D5, AC6).
+    const pausedMs = limiter.pausedRemaining();
+    if (pausedMs > 0) {
+      await rescheduleTask(pool, task, {
+        delayMs: pausedMs,
+        error: 'deferred: rate-limit pause',
+        httpStatus: null,
+      });
+      log.info(
+        { taskId: task.taskId, accommodationId: task.accommodationId, pausedMs },
+        'send deferred: the rate limiter is paused',
+      );
+      return;
+    }
     const startedAt = Date.now();
     const call = await client.putAvailability(task.accommodationId, {
       from: task.from,
