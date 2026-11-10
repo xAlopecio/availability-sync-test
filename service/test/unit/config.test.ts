@@ -25,8 +25,9 @@ describe('loadConfig', () => {
         apiKey: 'sol-demo-key',
         maxRequestsPerMinute: 25,
         timeoutMs: 5000,
+        timeoutSettleMs: 30000,
       },
-      worker: { concurrency: 3, leaseMs: 30000, pollMs: 500 },
+      worker: { enabled: true, concurrency: 3, leaseMs: 30000, pollMs: 500 },
       retry: { baseMs: 1000, maxMs: 300000 },
     });
   });
@@ -47,6 +48,8 @@ describe('loadConfig', () => {
         WORKER_CONCURRENCY: '1',
         TASK_LEASE_MS: '10000',
         WORKER_POLL_MS: '100',
+        WORKER_ENABLED: 'false',
+        PORTAL_TIMEOUT_SETTLE_MS: '3000',
         RETRY_BASE_MS: '500',
         RETRY_MAX_MS: '60000',
       }),
@@ -62,8 +65,9 @@ describe('loadConfig', () => {
         apiKey: 'secret',
         maxRequestsPerMinute: 10,
         timeoutMs: 2000,
+        timeoutSettleMs: 3000,
       },
-      worker: { concurrency: 1, leaseMs: 10000, pollMs: 100 },
+      worker: { enabled: false, concurrency: 1, leaseMs: 10000, pollMs: 100 },
       retry: { baseMs: 500, maxMs: 60000 },
     });
   });
@@ -82,6 +86,9 @@ describe('loadConfig', () => {
     ['PORTAL_API_KEY', ''],
     ['DATABASE_STARTUP_TIMEOUT_MS', '0'],
     ['SHUTDOWN_GRACE_MS', '0'],
+    ['PORTAL_TIMEOUT_SETTLE_MS', 'x'],
+    ['WORKER_ENABLED', 'yes'],
+    ['WORKER_ENABLED', '1'],
   ])('K3: rejects %s=%j, naming the variable', (name, value) => {
     const problems = problemsOf({ [name]: value });
     expect(problems).toHaveLength(1);

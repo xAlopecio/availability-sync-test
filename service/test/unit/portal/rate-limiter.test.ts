@@ -19,9 +19,9 @@ function seeded(seed: number): () => number {
 describe('SlidingWindowRateLimiter.tryAcquire', () => {
   it('R1 / AC11: allows `limit` starts, then says how long until the oldest leaves the window', () => {
     const rl = limiter(3);
-    expect(rl.tryAcquire(0)).toEqual({ ok: true });
-    expect(rl.tryAcquire(10)).toEqual({ ok: true });
-    expect(rl.tryAcquire(20)).toEqual({ ok: true });
+    expect(rl.tryAcquire(0)).toMatchObject({ ok: true });
+    expect(rl.tryAcquire(10)).toMatchObject({ ok: true });
+    expect(rl.tryAcquire(20)).toMatchObject({ ok: true });
     expect(rl.tryAcquire(30)).toEqual({ ok: false, waitMs: WINDOW - 30 });
   });
 
@@ -29,7 +29,7 @@ describe('SlidingWindowRateLimiter.tryAcquire', () => {
     const rl = limiter(1);
     expect(rl.tryAcquire(0).ok).toBe(true);
     expect(rl.tryAcquire(WINDOW - 1)).toEqual({ ok: false, waitMs: 1 });
-    expect(rl.tryAcquire(WINDOW)).toEqual({ ok: true });
+    expect(rl.tryAcquire(WINDOW)).toMatchObject({ ok: true });
   });
 
   it('R3 / AC11: in 10 simulated minutes no 60 s window ever holds more than `limit` starts', () => {
@@ -68,7 +68,7 @@ describe('SlidingWindowRateLimiter.tryAcquire', () => {
     const rl = limiter(10);
     rl.pauseUntil(5_000);
     expect(rl.tryAcquire(1_000)).toEqual({ ok: false, waitMs: 4_000 });
-    expect(rl.tryAcquire(5_000)).toEqual({ ok: true });
+    expect(rl.tryAcquire(5_000)).toMatchObject({ ok: true });
   });
 
   it('R5: when paused and full, waits for whichever ends later', () => {
@@ -170,6 +170,99 @@ describe('SlidingWindowRateLimiter.pauseFor', () => {
     const rl = new SlidingWindowRateLimiter({ limit: 5, windowMs: 1_000, now: () => clock });
     rl.pauseFor(5_000);
     expect(rl.tryAcquire(5_999)).toEqual({ ok: false, waitMs: 1 });
-    expect(rl.tryAcquire(6_000)).toEqual({ ok: true });
+    expect(rl.tryAcquire(6_000)).toMatchObject({ ok: true });
+  });
+});
+
+describe('SlidingWindowRateLimiter.release', () => {
+  it('R12: gives back the most recent permit', () => {
+    const rl = limiter(1);
+    const permit = rl.tryAcquire(0);
+    if (!permit.ok) throw new Error('permit expected');
+    expect(rl.tryAcquire(10).ok).toBe(false);
+    rl.release(permit.token);
+    expect(rl.tryAcquire(20)).toMatchObject({ ok: true });
+  });
+
+  it('R12: releasing with nothing taken is a no-op', () => {
+    const rl = limiter(1);
+    rl.release(12345); // not a permit this limiter issued
+    expect(rl.tryAcquire(0).ok).toBe(true);
+    expect(rl.tryAcquire(1).ok).toBe(false);
+  });
+
+  it('R12: an idle loop of acquire + release never fills the window', () => {
+    const rl = limiter(2);
+    for (let t = 0; t < 10_000; t += 100) {
+      const permit = rl.tryAcquire(t);
+      if (!permit.ok) throw new Error('permit expected');
+      rl.release(permit.token);
+    }
+    expect(rl.tryAcquire(10_000).ok).toBe(true);
+    expect(rl.tryAcquire(10_001).ok).toBe(true);
+  });
+});
+
+describe('SlidingWindowRateLimiter.acquire with a signal', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('R13: aborting while waiting rejects promptly with an AbortError and takes no permit', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const rl = limiter(1, 60_000);
+    rl.tryAcquire(0); // the window is full until t = 60 000
+    const controller = new AbortController();
+    const waiting = rl.acquire({ signal: controller.signal });
+    const outcome = waiting.then(
+      () => 'resolved',
+      (error: Error) => error.name,
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await outcome).toBe('AbortError');
+    // Only the original start occupies the window: one permit is free again at t = 60 000.
+    expect(rl.tryAcquire(60_000)).toMatchObject({ ok: true });
+  });
+
+  it('R13: an already-aborted signal rejects without waiting', async () => {
+    const rl = limiter(1);
+    await expect(rl.acquire({ signal: AbortSignal.abort() })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(rl.tryAcquire(0).ok).toBe(true); // no permit was taken
+  });
+});
+
+describe('SlidingWindowRateLimiter tokens and seeding', () => {
+  it("R14: release(token) frees that permit, not another slot's", () => {
+    const rl = limiter(2);
+    const a = rl.tryAcquire(0); // slot A: its claim will come back empty
+    const b = rl.tryAcquire(10); // slot B: really sends
+    if (!a.ok || !b.ok) throw new Error('both permits should be granted');
+    rl.release(a.token);
+    expect(rl.tryAcquire(20).ok).toBe(true);
+    // B's start (t = 10) still occupies the window; popping the newest would have left A's (t = 0).
+    expect(rl.tryAcquire(30)).toEqual({ ok: false, waitMs: 10 + WINDOW - 30 });
+  });
+
+  it('R15: seedRecent() records starts of an earlier process, which occupy the window until they age out', () => {
+    const rl = new SlidingWindowRateLimiter({ limit: 2, windowMs: WINDOW, now: () => 100_000 });
+    rl.seedRecent([55_000, 10_000]); // started at 45 000 and 90 000 on this clock
+    expect(rl.tryAcquire(100_000)).toEqual({ ok: false, waitMs: 45_000 + WINDOW - 100_000 });
+    expect(rl.tryAcquire(105_000).ok).toBe(true); // the 55 s-old start left the window
+    expect(rl.tryAcquire(105_001).ok).toBe(false); // the other one has not
+  });
+
+  it('pausedRemaining() reports what is left of the global pause', () => {
+    let clock = 0;
+    const rl = new SlidingWindowRateLimiter({ limit: 5, windowMs: WINDOW, now: () => clock });
+    expect(rl.pausedRemaining()).toBe(0);
+    rl.pauseFor(5_000);
+    clock = 1_000;
+    expect(rl.pausedRemaining()).toBe(4_000);
+    clock = 6_000;
+    expect(rl.pausedRemaining()).toBe(0);
   });
 });

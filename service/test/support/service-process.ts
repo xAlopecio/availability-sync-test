@@ -17,7 +17,9 @@ export type RunningService = {
 export function startService(env: Record<string, string>): RunningService {
   const child = spawn(process.execPath, ['src/main.ts'], {
     cwd: SERVICE_DIR,
-    env: { ...process.env, PORT: '0', LOG_LEVEL: 'info', ...env },
+    // The worker is off unless a test turns it on: process tests must not send portal traffic
+    // by accident.
+    env: { ...process.env, PORT: '0', LOG_LEVEL: 'info', WORKER_ENABLED: 'false', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const lines: string[] = [];

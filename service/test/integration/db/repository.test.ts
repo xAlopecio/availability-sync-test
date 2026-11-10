@@ -16,8 +16,11 @@ const count = async (table: 'updates' | 'sync_tasks') =>
 describe('acceptUpdate', () => {
   it('P1 / AC1: stores the update and one pending task per chunk', async () => {
     const request = anUpdate({ from: day('2026-11-09'), to: day('2027-02-06') }); // 90 days
-    const before = Date.now();
+    // Compare against the database clock: next_attempt_at is set by the database (now()), and the
+    // host's clock can differ from the container's (seen: 52 s after the Mac slept).
+    const before = ((await db.pool().query('SELECT now() AS now')).rows[0].now as Date).getTime();
     const accepted = await acceptUpdate(db.pool(), request, chunksOf(request));
+    const after = ((await db.pool().query('SELECT now() AS now')).rows[0].now as Date).getTime();
     expect(accepted).toEqual({ updateId: 1, chunks: 3, replayed: false });
 
     const update = (await db.pool().query('SELECT * FROM updates')).rows;
@@ -46,8 +49,8 @@ describe('acceptUpdate', () => {
         locked_until: null,
         last_attempt_at: null,
       });
-      expect((task.next_attempt_at as Date).getTime()).toBeLessThanOrEqual(Date.now());
-      expect((task.next_attempt_at as Date).getTime()).toBeGreaterThan(before - 5_000);
+      expect((task.next_attempt_at as Date).getTime()).toBeLessThanOrEqual(after);
+      expect((task.next_attempt_at as Date).getTime()).toBeGreaterThanOrEqual(before);
     }
   });
 

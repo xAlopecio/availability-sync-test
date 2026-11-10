@@ -1,14 +1,32 @@
-export type AcquireResult = { readonly ok: true } | { readonly ok: false; readonly waitMs: number };
+/** `token` identifies this permit, so `release(token)` gives back exactly this one. */
+export type AcquireResult =
+  { readonly ok: true; readonly token: number } | { readonly ok: false; readonly waitMs: number };
 
 export type RateLimiterOptions = {
   /** Maximum request starts in any window. */
   readonly limit: number;
   readonly windowMs: number;
   readonly now?: () => number;
-  readonly sleep?: (ms: number) => Promise<void>;
+  readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 };
 
-const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const abortError = () =>
+  new DOMException('The wait for a rate-limit permit was aborted', 'AbortError');
+
+/** setTimeout-based sleep that ends early, rejecting, when `signal` aborts. */
+const defaultSleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(abortError());
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 
 /** setTimeout overflows above 2^31 − 1 ms into a 1 ms busy loop; long waits are slept in steps. */
 const MAX_SLEEP_MS = 60_000;
@@ -21,9 +39,10 @@ export class SlidingWindowRateLimiter {
   readonly #limit: number;
   readonly #windowMs: number;
   readonly #now: () => number;
-  readonly #sleep: (ms: number) => Promise<void>;
-  /** Start times still inside the window, oldest first. */
-  #starts: number[] = [];
+  readonly #sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** Starts still inside the window, oldest first; `token` lets release() find its own permit. */
+  #starts: { at: number; token: number }[] = [];
+  #nextToken = 1;
   #pausedUntil = 0;
 
   constructor(options: RateLimiterOptions) {
@@ -43,15 +62,17 @@ export class SlidingWindowRateLimiter {
   /** Takes a permit if one is free at `now`; otherwise says how long to wait. Pure, no timers. */
   tryAcquire(now: number): AcquireResult {
     // A start at t occupies (t − window, t], so it leaves the window exactly at t + window.
-    while (this.#starts.length > 0 && this.#starts[0]! <= now - this.#windowMs)
+    while (this.#starts.length > 0 && this.#starts[0]!.at <= now - this.#windowMs) {
       this.#starts.shift();
+    }
     const pauseWait = this.#pausedUntil - now;
     const windowWait =
-      this.#starts.length >= this.#limit ? this.#starts[0]! + this.#windowMs - now : 0;
+      this.#starts.length >= this.#limit ? this.#starts[0]!.at + this.#windowMs - now : 0;
     const waitMs = Math.max(pauseWait, windowWait);
     if (waitMs > 0) return { ok: false, waitMs };
-    this.#starts.push(now);
-    return { ok: true };
+    const token = this.#nextToken++;
+    this.#starts.push({ at: now, token });
+    return { ok: true, token };
   }
 
   /** Denies every permit until `until`, on the limiter's clock. Never shortens an existing pause. */
@@ -64,12 +85,38 @@ export class SlidingWindowRateLimiter {
     this.pauseUntil(this.#now() + ms);
   }
 
-  /** Waits until a permit is free and takes it. */
-  async acquire(): Promise<void> {
+  /** How long the global pause still lasts, or 0. */
+  pausedRemaining(): number {
+    return Math.max(0, this.#pausedUntil - this.#now());
+  }
+
+  /**
+   * Gives back the permit identified by `token` (a claim found nothing to send, SPEC D5). Popping
+   * the newest start instead could return another slot's permit and allow N + 1 in a window.
+   */
+  release(token: number): void {
+    const index = this.#starts.findIndex((start) => start.token === token);
+    if (index >= 0) this.#starts.splice(index, 1);
+  }
+
+  /** Records starts made `agesMs` ago by an earlier process (read from the database, SPEC D5). */
+  seedRecent(agesMs: readonly number[]): void {
+    const now = this.#now();
+    for (const age of agesMs) this.#starts.push({ at: now - age, token: this.#nextToken++ });
+    this.#starts.sort((a, b) => a.at - b.at);
+  }
+
+  /**
+   * Waits until a permit is free and takes it; resolves with its token. Rejects with an
+   * AbortError if `signal` aborts.
+   */
+  async acquire(options: { signal?: AbortSignal } = {}): Promise<number> {
+    const { signal } = options;
     for (;;) {
+      if (signal?.aborted) throw abortError();
       const result = this.tryAcquire(this.#now());
-      if (result.ok) return;
-      await this.#sleep(Math.min(result.waitMs, MAX_SLEEP_MS));
+      if (result.ok) return result.token;
+      await this.#sleep(Math.min(result.waitMs, MAX_SLEEP_MS), signal);
     }
   }
 }

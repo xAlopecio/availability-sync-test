@@ -98,10 +98,11 @@ Los fallos transitorios se reintentan **sin límite**: poner un tope significar�
 ### D5. Concurrencia y limitación de peticiones
 - La concurrencia del worker es **3** por defecto, para que el rendimiento no se hunda si el portal se vuelve lento.
 - **Como mucho una tarea en vuelo por alojamiento**, como exige D1.
-- Un limitador global en memoria de ventana deslizante permite como mucho `PORTAL_MAX_REQUESTS_PER_MINUTE` (25 por defecto) inicios de petición en cualquier ventana de 60 s. Cada hueco del worker obtiene permiso **antes** de reclamar una tarea, para no retener un lease mientras espera.
+- Un limitador global en memoria de ventana deslizante permite como mucho `PORTAL_MAX_REQUESTS_PER_MINUTE` (25 por defecto) inicios de petición en cualquier ventana de 60 s. Cada hueco del worker obtiene permiso **antes** de reclamar una tarea, para no retener un lease mientras espera. Si al reclamar no hay nada, se devuelve **ese** permiso (cada permiso tiene un token): un worker ocioso no consume cupo. La espera de un permiso se puede cancelar, así que el apagado nunca espera a la ventana. Justo antes de enviar, el hueco vuelve a comprobar la pausa global: un permiso conseguido justo antes del 429 de otro hueco no debe enviarse antes del `Retry-After`, así que la tarea se reprograma.
+- **Un único worker activo por base de datos.** El worker toma un advisory lock de sesión antes de su primera reclamación; las demás instancias quedan solo con la API (en espera) y reintentan el lock, de modo que una segunda réplica, o el proceso antiguo durante un despliegue *rolling*, nunca duplica el ritmo. Al arrancar, el limitador se inicializa con los intentos del último minuto leídos de la base de datos, para que un reinicio no ponga a cero nuestra parte de la ventana del portal. Solo se guarda el último intento de cada tarea, así que una tarea reintentada dos veces en ese minuto cuenta una; el margen de 25 frente a 30 lo absorbe.
 
 ### D6. Leases para sobrevivir a caídas
-Reclamar una tarea fija `locked_until = now() + lease` (30 s por defecto, muy por encima del timeout de 5 s) e incrementa `attempts`. Si el proceso muere a mitad de petición, el lease caduca y la tarea se reclama de nuevo. Reenviarla es seguro porque el PUT es idempotente. Consulta de reclamación (esquema):
+Reclamar una tarea fija `locked_until = now() + lease` (30 s por defecto, muy por encima del timeout de 5 s) e incrementa `attempts`. Si el proceso muere a mitad de petición, el lease caduca y la tarea se reclama de nuevo. Reenviarla es seguro porque el PUT es idempotente. La reclamación devuelve el nuevo valor de `attempts` como **token de exclusión** (*fencing token*): completar, reprogramar o fallar una tarea solo se aplica mientras el token siga coincidiendo, de modo que un worker cuyo lease caducó no puede sobrescribir el resultado del worker que volvió a reclamar la tarea. **Todas las horas de la cola usan el reloj de la base de datos**: leases, `next_attempt_at` (la app pasa un retraso y la base de datos calcula `now() + retraso`) y `last_timeout_at`. Así, una diferencia entre los relojes de la app y de la base de datos nunca puede desplazar un reintento ni un lease. Visto en las pruebas: el reloj de la VM de Docker iba 52 s retrasado después de que el Mac entrara en reposo. Consulta de reclamación (esquema):
 
 ```sql
 SELECT t.id FROM sync_tasks t
@@ -122,6 +123,11 @@ Las consultas que hacen correcto el sistema son específicas de Postgres: `FOR U
 
 Todo el SQL vive en una capa de repositorio fina (`db/repository.ts`) que devuelve objetos tipados. El resto del código no sabe que existe SQL, así que cambiar el enfoque de acceso a datos más adelante solo toca un fichero. Las migraciones son ficheros `.sql` numerados que aplica al arrancar un pequeño ejecutor (`db/migrate.ts`), el cual registra los ficheros aplicados en una tabla `schema_migrations`.
 *Considerado:* Kysely, un query builder tipado que soporta `.forUpdate().skipLocked()`. Es una opción razonable, pero con dos tablas la seguridad de tipos que aporta no justifica una dependencia más ni lo que cuesta aprenderla, y los advisory locks seguirían siendo SQL crudo.
+
+### D9. Aplicación tardía tras un timeout: una ventana de espera
+Un PUT que expira en nuestro lado puede aplicarse en el portal **más tarde**, cuando ya lo hemos reintentado y hemos pasado al siguiente update del alojamiento. Si esa aplicación tardía llega después del PUT más nuevo, sobrescribe esos días con el valor antiguo. FIFO ordena lo que *enviamos*, no lo que el portal *aplica*, y la idempotencia no ayuda porque los valores son distintos. Se reprodujo contra el portal real: 1 estado final obsoleto de 14 PUT que expiraron. Medido en la variante `base`: un PUT abandonado se aplica más tarde o nunca (3 de 25 no se aplicaron nunca), y se observó una aplicación tardía **al menos 5 s** después de que lo diéramos por perdido. Los 30 s por defecto dejan un margen amplio sobre eso.
+
+Por eso, cuando un intento expira, la tarea registra `last_timeout_at`. **Al reclamar**, una tarea no se puede reclamar mientras otra tarea del mismo alojamiento cuyos días se **solapen** con los suyos haya expirado hace menos de `PORTAL_TIMEOUT_SETTLE_MS` (30 s por defecto), tiempo suficiente para que la petición original termine. Comprobarlo al reclamar cubre los updates aceptados *después* de que se completara la tarea expirada, por ejemplo una corrección rápida del gestor; la primera versión solo retenía las tareas que ya estaban en cola al completar, y la review del worker encontró ese hueco. Solo esperan los días solapados, y solo después de un timeout. *Riesgo residual:* un portal que aplique una petición más de la ventana después de nuestro timeout. La solución completa es la verificación por lectura o la reconciliación periódica (§11).
 
 ## 5. Modelo de datos (PostgreSQL)
 
@@ -145,12 +151,15 @@ sync_tasks (
   attempts int NOT NULL DEFAULT 0,
   next_attempt_at timestamptz NOT NULL DEFAULT now(),
   locked_until timestamptz,
-  last_error text, last_http_status int,
+  last_error text, last_http_status int,       -- del intento más reciente; se borra tras un éxito
   last_attempt_at timestamptz,               -- cuándo empezó el último intento (sync-status, depuración)
+  last_timeout_at timestamptz,               -- último intento que expiró (ventana de espera de D9)
   completed_at timestamptz
 )
 -- índices: (accommodation_id, status, id), (status, next_attempt_at)
 ```
+
+Formatos de `last_error`: `"<status> <CODE>: <message>"` para errores HTTP (p. ej. `"404 NOT_FOUND: Accommodation acc-9999 not found"`), `"timeout after <ms> ms"`, `"network error <code>"`.
 
 El estado de un update se **deduce** de sus tareas: `failed` si alguna falló, `synced` si todas están hechas y `pending` en otro caso. Guardarlo aparte duplicaría estado.
 
@@ -236,7 +245,7 @@ Todos los errores, incluido el `404` de rutas desconocidas, usan el mismo format
 
 ## 8. Configuración (variables de entorno)
 
-`PORT=3000`, `DATABASE_URL=postgres://sync:sync@localhost:5432/sync`, `PORTAL_BASE_URL=http://localhost:4000`, `PORTAL_API_KEY=sol-demo-key`, `PORTAL_MAX_REQUESTS_PER_MINUTE=25`, `PORTAL_TIMEOUT_MS=5000`, `WORKER_CONCURRENCY=3`, `TASK_LEASE_MS=30000`, `RETRY_BASE_MS=1000`, `RETRY_MAX_MS=300000`, `WORKER_POLL_MS=500`, `LOG_LEVEL=info`, `MAX_UPDATE_RANGE_DAYS=366`, `DATABASE_STARTUP_TIMEOUT_MS=30000`, `SHUTDOWN_GRACE_MS=10000`.
+`PORT=3000`, `DATABASE_URL=postgres://sync:sync@localhost:5432/sync`, `PORTAL_BASE_URL=http://localhost:4000`, `PORTAL_API_KEY=sol-demo-key`, `PORTAL_MAX_REQUESTS_PER_MINUTE=25`, `PORTAL_TIMEOUT_MS=5000`, `WORKER_CONCURRENCY=3`, `TASK_LEASE_MS=30000`, `RETRY_BASE_MS=1000`, `RETRY_MAX_MS=300000`, `WORKER_POLL_MS=500`, `WORKER_ENABLED=true` (`false` ejecuta solo la API), `PORTAL_TIMEOUT_SETTLE_MS=30000` (D9), `LOG_LEVEL=info`, `MAX_UPDATE_RANGE_DAYS=366`, `DATABASE_STARTUP_TIMEOUT_MS=30000`, `SHUTDOWN_GRACE_MS=10000`.
 
 La configuración se valida al arrancar, y se informa de todas las variables inválidas a la vez. `TASK_LEASE_MS` debe ser mayor que `PORTAL_TIMEOUT_MS` (D6).
 
@@ -257,8 +266,8 @@ Cada criterio corresponde al menos a un test automatizado. **U** = unitario; **I
 | AC5 | **Orden:** los PUT de un alojamiento llegan al portal en orden de aceptación (el último PUT con éxito de cada día coincide con AC4), y nunca hay más de uno en vuelo por alojamiento. | I |
 | AC6 | **Límites:** con la configuración por defecto, el portal nunca responde `429`. Con el limitador puesto a propósito por encima de 30/min, tras cualquier `429` no se envía ninguna petición antes de que pase el `Retry-After` (se comprueba con las marcas de tiempo del log de admin). | I |
 | AC7 | **Reinicio:** los updates aceptados y luego interrumpidos al parar el servicio antes de sincronizar (incluida una tarea con un lease activo, que simula una caída) se sincronizan todos tras el reinicio. | I |
-| AC8 | **Timeouts:** con un timeout muy bajo (p. ej. 50 ms), de modo que las peticiones expiran pero pueden haberse aplicado, todos los updates convergen igualmente al estado final correcto. | I |
-| AC9 | **Errores permanentes:** un update para un alojamiento inexistente acaba `failed` tras exactamente 1 petición al portal, sin reintentos, y no bloquea a otros updates. | I |
+| AC8 | **Timeouts:** con un timeout cercano a la latencia mediana del portal (≈ 400 ms), de modo que una gran parte de las peticiones expira, algunas después de que el portal las haya aplicado, todos los updates convergen igualmente al estado final correcto. (Un timeout mucho más bajo casi no dejaría pasar nada y nunca convergería.) | I |
+| AC9 | **Errores permanentes:** un update para un alojamiento inexistente acaba `failed` en cuanto el portal responde `404`: **no se envía ninguna petición para él después de ese 404** (solo pueden precederlo fallos transitorios: los `503` aleatorios del portal y las respuestas lentas que abandonamos por timeout), y no bloquea a otros updates. | I |
 | AC10 | La clasificación de respuestas y el backoff siguen D4: la clase correcta para cada código, un backoff dentro de sus límites y el `Retry-After` respetado. | U |
 | AC11 | El limitador nunca permite más de N inicios en cualquier ventana de 60 s (con reloj simulado). | U |
 | AC12 | `sync-status` muestra `pending` y luego `synced`, con contadores y progreso de trozos correctos; muestra `failed` con el error en el caso de AC9; `404` para un id desconocido. | I |
@@ -268,15 +277,16 @@ Los tests de integración son lentos por naturaleza (el portal admite 30 peticio
 
 ## 10. Trade-offs y límites de alcance
 
-- **Una sola instancia.** La lógica de reclamación en BD (`SKIP LOCKED`, leases) ya es segura con varias instancias; solo el limitador vive en memoria. Varias réplicas necesitarían un limitador compartido (una fila en la BD o Redis).
+- **Un único worker activo.** Varias réplicas pueden servir la API, pero solo envía la que tiene el lock (D5). Más rendimiento que el de un worker necesitaría un limitador compartido (una fila en la BD o Redis), no más workers.
 - **Polling** a la BD cada 500 ms en lugar de `LISTEN/NOTIFY`: más simple, y la latencia es despreciable frente a los límites del portal.
 - **Sin fusión de updates.** Los updates ya superados por otros se envían igualmente. Es correcto, pero desperdicia peticiones si hay muchos cambios.
 - **`Idempotency-Key` es opcional.** Un duplicado no siempre es inofensivo con D1. Si la conexión cae durante el `COMMIT`, el update puede quedar guardado mientras el cliente recibe un `503` y reintenta. Si el cliente envió otro update B entre medias, el A reintentado llega después de B y el portal termina con A. Con la clave, el reintento se reconoce y no se guarda nada de nuevo. Los clientes que no la envían asumen ese riesgo. (Un modelo de estado deseado por día tampoco lo eliminaría: un reintento es indistinguible de un cambio nuevo salvo que el cliente lo identifique.)
 - **Sin detección de deriva.** Si alguien cambia el portal por fuera de este servicio, no nos enteramos.
+- **Aplicación tardía más allá de la ventana (D9).** Si el portal aplica una petición expirada más de `PORTAL_TIMEOUT_SETTLE_MS` después de nuestro timeout, puede quedar un valor obsoleto. Aceptado: requiere un portal que tarde más de 30 s, además de nuestro timeout de 5 s; la verificación por lectura o la reconciliación (§11) lo cerrarían.
 
 ## 11. Siguientes pasos (con más tiempo)
 
-Estado deseado por día con fusión de updates (sustituyendo D1): una fila por alojamiento y día con el valor deseado y una versión; el worker envía los días pendientes agrupados en rangos y los marca como sincronizados solo si su versión no cambió mientras tanto. Ahorra peticiones cuando los mismos días cambian repetidamente y hace `sync-status` exacto por día, a costa de un esquema, un repositorio y un worker nuevos. Se deja fuera a propósito: con D1 más `Idempotency-Key` el estado final del portal es igual de correcto, y la API no cambiaría; limitador compartido para varias instancias; relanzar a mano los updates fallidos; reconciliación periódica (`GET` y comparar) con el cupo libre; `LISTEN/NOTIFY`.
+Estado deseado por día con fusión de updates (sustituyendo D1): una fila por alojamiento y día con el valor deseado y una versión; el worker envía los días pendientes agrupados en rangos y los marca como sincronizados solo si su versión no cambió mientras tanto. Ahorra peticiones cuando los mismos días cambian repetidamente y hace `sync-status` exacto por día, a costa de un esquema, un repositorio y un worker nuevos. Se deja fuera a propósito: con D1 más `Idempotency-Key` el estado final del portal es igual de correcto, y la API no cambiaría; limitador compartido para varias instancias; relanzar a mano los updates fallidos; verificación por lectura tras los timeouts (el `GET` de los días afectados cuando se vacía la cola de un alojamiento, reencolando una corrección si no coinciden) y reconciliación periódica (`GET` y comparar) con el cupo libre, que cierran el riesgo residual de D9; `LISTEN/NOTIFY`.
 
 ## 12. Método de trabajo
 
@@ -290,7 +300,7 @@ Estado deseado por día con fusión de updates (sustituyendo D1): una fila por a
     - `docs/<nombre>`: solo documentación.
   - Nunca se commitea directamente en `master` ni en `develop`.
 - **TDD para `domain/` y el limitador:** escribir los escenarios de §9 como tests que fallan, implementar y después refactorizar.
-- **Tests de integración** para los comportamientos que solo el portal real puede demostrar (AC4–AC9, AC12–AC13).
+- **Tests de integración** para los comportamientos que solo el portal real puede demostrar (AC4–AC9, AC12–AC13), con el worker dentro del proceso del test. La sincronización **nunca** se prueba contra un portal simulado. Un servidor HTTP falso local se usa solo para los fallos de transporte del cliente (timeouts, conexiones cortadas o rechazadas, bodies sin JSON), que el portal real no produce a demanda. El CI ejecuta la integración contra PostgreSQL **y la imagen real de Portal Sol**.
 - **Asistido por IA.** Un `CLAUDE.md` recoge el stack, las convenciones, cómo montar el entorno y la regla de "tests primero". Dos skills del proyecto:
   - `tdd-cycle`: rojo → verde → refactor, con un commit por paso.
   - `verify-portal`: resetear el portal, ejecutar un escenario y comprobar `/__admin/requests` y el estado final del portal.
@@ -304,3 +314,4 @@ Estado deseado por día con fusión de updates (sustituyendo D1): una fila por a
 - v3: cambios a raíz de la review de `feature/core`. Solo `400`/`404` son permanentes; cualquier otro código no documentado se reintenta como `unexpected_status`, con alerta, para que no pueda descartar un update aceptado. El `Retry-After` tiene un máximo de 10 min. Queda documentada la limitación conocida de `sync-status`.
 - v4: §3 añade la organización del código (tests en su propio árbol `test/` que replica `src/`, y `domain/` dividido en `calendar/`, `updates/` y `retry/`), decidida antes del bloque de la API. La §12 añade el prefijo de rama `refactor/<nombre>` para cambios estructurales sin cambio de comportamiento.
 - v5: decisiones tomadas al definir los escenarios de test de la API (`docs/scenarios/api.md`). §5: nueva columna `sync_tasks.last_attempt_at`. §6: `413`, `415` y `503` con `Retry-After`; un único formato para todos los errores; `404` para un `:id` inválido; la semántica de `attempts`, `lastError`, `nextAttemptAt` y `syncedAt` en updates con varios trozos. §8: `MAX_UPDATE_RANGE_DAYS`, `DATABASE_STARTUP_TIMEOUT_MS`, validación de la configuración, y comportamiento al arrancar y al apagar. Tras la review de la API: `Idempotency-Key` opcional (`updates.idempotency_key`, `422` si se reutiliza, cabecera de repetición); resiliencia de la base de datos en ejecución (errores del pool, `statement_timeout`/`lock_timeout`, timeout por petición); `SHUTDOWN_GRACE_MS`; §10/§11 explican por qué los duplicados no siempre son inofensivos y por qué el modelo por día queda fuera.
+- v6: decisiones tomadas al definir los escenarios de test del worker (`docs/scenarios/worker.md`). D5: se devuelven los permisos cuando no hay nada que reclamar, y la espera es cancelable. D6: el token de exclusión `attempts`. §5: `last_error` se borra tras un éxito; formato `"<status> <CODE>: <message>"` / `"timeout after <ms> ms"` / `"network error <code>"`. §8: `WORKER_ENABLED`. AC8: un timeout cercano a la mediana en lugar de 50 ms, con el que nunca convergería. AC9: "ninguna petición tras el 404" en lugar de "exactamente 1 petición" (el portal responde 503 aleatorios incluso para alojamientos desconocidos). §12: un servidor falso solo para fallos de transporte; Portal Sol en el CI. D9 (decisión del autor después de que L6 lo destapara): una ventana de espera tras un timeout (`last_timeout_at`, `PORTAL_TIMEOUT_SETTLE_MS`), riesgo residual en §10, verificación y reconciliación en §11. D6: todas las horas de la cola con el reloj de la base de datos (descubierto cuando el reloj de la VM de Docker se desvió 52 s tras el reposo). Tras la review del worker: la retención de D9 se evalúa al reclamar y solo en días solapados; en D5, tokens de permiso, comprobación de la pausa antes de enviar, un único worker activo por base de datos (advisory lock) y un limitador inicializado desde la base de datos.
