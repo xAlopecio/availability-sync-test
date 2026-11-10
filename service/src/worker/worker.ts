@@ -61,13 +61,14 @@ export function createWorker(options: WorkerOptions): Worker {
   const stopping = new AbortController();
   let slots: Promise<void>[] = [];
 
-  const pause = (ms: number) => sleepUnlessAborted(ms, stopping.signal);
+  const pause = (ms: number, signal: AbortSignal = stopping.signal) =>
+    sleepUnlessAborted(ms, signal);
 
-  async function runSlot(slot: number): Promise<void> {
-    while (!stopping.signal.aborted) {
+  async function runSlot(slot: number, signal: AbortSignal): Promise<void> {
+    while (!signal.aborted) {
       let permit: number;
       try {
-        permit = await limiter.acquire({ signal: stopping.signal });
+        permit = await limiter.acquire({ signal });
       } catch {
         return; // aborted by stop()
       }
@@ -83,13 +84,13 @@ export function createWorker(options: WorkerOptions): Worker {
           { err: error, slot },
           'worker could not claim a task; retrying after the poll interval',
         );
-        await pause(pollMs);
+        await pause(pollMs, signal);
         continue;
       }
       if (task === null) {
         // Nothing to send: give this slot's permit back so an idle worker uses no quota (SPEC D5).
         limiter.release(permit);
-        await pause(pollMs);
+        await pause(pollMs, signal);
         continue;
       }
       // Not aborted by stop(): an in-flight attempt finishes and its outcome is stored.
@@ -102,7 +103,7 @@ export function createWorker(options: WorkerOptions): Worker {
           { err: error, slot, taskId: task.taskId, accommodationId: task.accommodationId },
           'unexpected error in a worker slot; the task will be retried when its lease expires',
         );
-        await pause(pollMs);
+        await pause(pollMs, signal);
       }
     }
   }
@@ -187,14 +188,78 @@ export function createWorker(options: WorkerOptions): Worker {
     options.onAttempt?.({ task, startedAt, endedAt, call, action });
   }
 
+  /** Session advisory lock: one active worker per database (SPEC D5). Disjoint key space. */
+  const LEADER_LOCK = 'SELECT pg_try_advisory_lock(2, 1) AS ok';
+  const leaderRetryMs = options.leaderRetryMs ?? 5_000;
+  let leadership: Promise<void> | undefined;
+
+  /** Seeds the limiter with the attempts of the last minute, possibly by another process. */
+  async function seedLimiter(): Promise<number> {
+    const { rows } = await pool.query<{ age_ms: number }>(
+      `SELECT (extract(epoch FROM now() - last_attempt_at) * 1000)::float8 AS age_ms
+         FROM sync_tasks
+        WHERE last_attempt_at > now() - interval '60 seconds'`,
+    );
+    limiter.seedRecent(rows.map((row) => row.age_ms));
+    return rows.length;
+  }
+
+  async function lead(): Promise<void> {
+    let announcedStandby = false;
+    while (!stopping.signal.aborted) {
+      let client: pg.PoolClient;
+      try {
+        client = await pool.connect();
+      } catch (error) {
+        log.warn({ err: error }, 'worker could not reach the database; retrying');
+        await pause(leaderRetryMs);
+        continue;
+      }
+      const lost = new AbortController();
+      // A checked-out client that errors (connection killed) must not crash the process; losing
+      // the lock's session means losing the lock, so the slots stop and we compete again.
+      client.on('error', (error) => {
+        log.error({ err: error }, 'worker lost its database session; stopping sends');
+        lost.abort();
+      });
+      let leader = false;
+      try {
+        leader = (await client.query<{ ok: boolean }>(LEADER_LOCK)).rows[0]?.ok === true;
+        if (!leader) {
+          if (!announcedStandby) {
+            log.info({}, 'another worker is active on this database; standing by (API only)');
+            announcedStandby = true;
+          }
+        } else {
+          const seeded = await seedLimiter();
+          log.info(
+            { concurrency, seededStarts: seeded },
+            'worker active (holds the single-worker lock)',
+          );
+          announcedStandby = false;
+          const run = AbortSignal.any([stopping.signal, lost.signal]);
+          slots = Array.from({ length: concurrency }, (_, slot) => runSlot(slot, run));
+          await Promise.all(slots);
+        }
+      } catch (error) {
+        log.error({ err: error }, 'worker leadership error; retrying');
+      } finally {
+        if (leader && !lost.signal.aborted) {
+          await client.query('SELECT pg_advisory_unlock(2, 1)').catch(() => {});
+        }
+        client.release(lost.signal.aborted);
+      }
+      if (!stopping.signal.aborted) await pause(leaderRetryMs);
+    }
+  }
+
   return {
     start() {
-      if (slots.length > 0) return;
-      slots = Array.from({ length: concurrency }, (_, slot) => runSlot(slot));
+      leadership ??= lead();
     },
     async stop() {
       stopping.abort();
-      await Promise.all(slots);
+      await leadership;
     },
   };
 }
