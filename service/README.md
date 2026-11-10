@@ -31,24 +31,26 @@ npm run dev        # same, restarting on file changes
 
 Through environment variables, validated at startup: every invalid variable is reported at once, and the service exits. The defaults suit the local `docker compose` setup.
 
-| Variable                         | Default                                    | Purpose                                                             |
-| -------------------------------- | ------------------------------------------ | ------------------------------------------------------------------- |
-| `PORT`                           | `3000`                                     | HTTP port (`0` = any free port)                                     |
-| `DATABASE_URL`                   | `postgres://sync:sync@localhost:5432/sync` | PostgreSQL connection                                               |
-| `DATABASE_STARTUP_TIMEOUT_MS`    | `30000`                                    | How long startup retries an unreachable database, then exits        |
-| `SHUTDOWN_GRACE_MS`              | `10000`                                    | How long `SIGTERM` waits for in-flight work before forcing the exit |
-| `MAX_UPDATE_RANGE_DAYS`          | `366`                                      | Longest accepted `from`..`to` range                                 |
-| `LOG_LEVEL`                      | `info`                                     | pino level (`fatal` … `trace`, `silent`)                            |
-| `PORTAL_BASE_URL`                | `http://localhost:4000`                    | Portal Sol URL _(used by the worker, next block)_                   |
-| `PORTAL_API_KEY`                 | `sol-demo-key`                             | Portal Sol API key _(worker)_                                       |
-| `PORTAL_MAX_REQUESTS_PER_MINUTE` | `25`                                       | Client-side rate limit _(worker)_                                   |
-| `PORTAL_TIMEOUT_MS`              | `5000`                                     | Timeout per portal request _(worker)_                               |
-| `WORKER_CONCURRENCY`             | `3`                                        | Parallel sends _(worker)_                                           |
-| `TASK_LEASE_MS`                  | `30000`                                    | Lease on a claimed task; must exceed `PORTAL_TIMEOUT_MS`            |
-| `WORKER_POLL_MS`                 | `500`                                      | Idle polling interval _(worker)_                                    |
-| `RETRY_BASE_MS` / `RETRY_MAX_MS` | `1000` / `300000`                          | Backoff base and cap _(worker)_                                     |
+| Variable                         | Default                                    | Purpose                                                                                                   |
+| -------------------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `PORT`                           | `3000`                                     | HTTP port (`0` = any free port)                                                                           |
+| `DATABASE_URL`                   | `postgres://sync:sync@localhost:5432/sync` | PostgreSQL connection                                                                                     |
+| `DATABASE_STARTUP_TIMEOUT_MS`    | `30000`                                    | How long startup retries an unreachable database, then exits                                              |
+| `SHUTDOWN_GRACE_MS`              | `10000`                                    | How long `SIGTERM` waits for in-flight work before forcing the exit                                       |
+| `MAX_UPDATE_RANGE_DAYS`          | `366`                                      | Longest accepted `from`..`to` range                                                                       |
+| `LOG_LEVEL`                      | `info`                                     | pino level (`fatal` … `trace`, `silent`)                                                                  |
+| `WORKER_ENABLED`                 | `true`                                     | `false` runs the API only (nothing is sent to the portal)                                                 |
+| `PORTAL_BASE_URL`                | `http://localhost:4000`                    | Portal Sol URL                                                                                            |
+| `PORTAL_API_KEY`                 | `sol-demo-key`                             | Portal Sol API key                                                                                        |
+| `PORTAL_MAX_REQUESTS_PER_MINUTE` | `25`                                       | Client-side rate limit, below the portal's 30/min (`503`s count too)                                      |
+| `PORTAL_TIMEOUT_MS`              | `5000`                                     | Timeout per portal request                                                                                |
+| `PORTAL_TIMEOUT_SETTLE_MS`       | `30000`                                    | After a timed-out attempt, how long the accommodation's next update waits (a late write could still land) |
+| `WORKER_CONCURRENCY`             | `3`                                        | Parallel sends (never two for one accommodation)                                                          |
+| `TASK_LEASE_MS`                  | `30000`                                    | Lease on a claimed task; must exceed `PORTAL_TIMEOUT_MS`                                                  |
+| `WORKER_POLL_MS`                 | `500`                                      | Idle polling interval                                                                                     |
+| `RETRY_BASE_MS` / `RETRY_MAX_MS` | `1000` / `300000`                          | Backoff base and cap for transient failures                                                               |
 
-On startup the service waits for the database, applies pending migrations, then listens. `SIGTERM` closes the HTTP server and the database pool before exiting. Losing the database while running never crashes the process: requests answer `503` until it is back.
+On startup the service waits for the database, applies pending migrations, listens, and starts the worker. `SIGTERM` stops the worker (in-flight attempts finish and are stored), then the HTTP server, then the database pool. Losing the database while running never crashes the process: requests answer `503` until it is back.
 
 ## API
 
@@ -74,7 +76,7 @@ Tests import production code as `#src/...` (Node subpath import, see `package.js
 
 ```bash
 npm test                    # unit tests: fast, no Docker needed
-npm run test:integration    # against the real PostgreSQL (and later Portal Sol); start them first
+npm run test:integration    # against the real PostgreSQL and Portal Sol (start them first); a few minutes
 npm run test:e2e            # the whole service against the real portal; the slowest suite
 npm run check               # typecheck + lint + format check + unit tests (also runs in CI on every PR)
 ```

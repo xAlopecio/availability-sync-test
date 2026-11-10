@@ -117,3 +117,28 @@ Legend: 🤖 delegated to the AI · 👤 decided or done by the author · ⚠️
   - Deferred: `/health` and readiness → `feature/metrics`; worker column semantics → worker tests.
 - ⚠️🔍 Two more equivalent mutants found and documented: the id-pattern guard on `GET`, and the in-transaction idempotency lookup (the unique-constraint path gives the same result).
 - ⚠️ **Leftover process:** a `node src/main.ts` started by the AI during the restructuring had been listening on port 3998 for hours. The `kill %1` had run in another shell. The reviewer noticed it; the AI confirmed it was its own and stopped it.
+
+## Phase 5 — The worker: sending to Portal Sol (`feature/worker`)
+
+- 🤖 Drafted ~45 scenarios (`docs/scenarios/worker.md`) with 9 open questions. 👤 Asked for Q6 (a local fake server) to be explained, then approved all of them: SPEC v6.
+  - 🔍 Writing the scenarios exposed **AC8 as written could never pass**: a 50 ms timeout against a portal median of 470 ms lets almost nothing succeed. It became "≈ 400 ms".
+  - 🔍 AC9's "exactly 1 request" would have been flaky: the portal answers random 503s even for unknown ids. It became "nothing after the 404".
+- 🤖 Implemented, red → green: limiter `release()` / abortable `acquire()`, the attempt decision, the portal client (real portal + a fake server **only** for transport faults), the queue (claim with fencing token, sibling failure, D6), the worker loop, wiring into `main.ts`, type-aware `no-floating-promises`, and Portal Sol in CI.
+- 🔍 **Mutation checks:**
+  - queue: removing the head-of-queue check, the fencing, the sibling failure or the lease-expiry condition is each caught. **Removing `SKIP LOCKED` survived** (Postgres waits and re-evaluates, so the result is the same, only later). New test Q11 holds a row lock from outside and requires an immediate claim.
+  - worker: too many slots, no permit release, a non-cancellable wait, and **no global pause after a 429** (L4 then sees sends before `Retry-After`) are each caught.
+  - D9: removing the settle hold is caught by Q13.
+- ⚠️🔍 **Test bugs the AI wrote, caught by failing runs:**
+  - L8 measured concurrency as "attempts overlapping a given one", which overstates it; it now uses a sweep line.
+  - Q13 assumed a claim order the claim rule does not promise.
+  - P1, Q2 and Q12 compared host time with database time.
+- ⚠️🔍 **The big one: AC8 (L6) failed intermittently, and it was a real correctness hole, not test flakiness.**
+  - A PUT that times out on our side can be applied by the portal **after** the accommodation's next update, leaving the older value. FIFO orders what we send, not what the portal applies.
+  - The AI reproduced it outside the tests (1 stale result in 14 timeouts). 👤 The author chose option A: **D9, a settle window** after a timeout.
+  - The first test window (3 s) still failed 1 in 5. Diagnostics in L6 showed a late write ≥ 5 s after we gave up; measurement showed abandoned PUTs land later or never (3 of 25). The AI's first estimate ("under 1 s", from 2 samples) was wrong. The test window became 15 s (production 30 s), and 8/8 + repeated full runs pass.
+- ⚠️🔍 **The environment fooled the tests twice, and the investigation still found a real bug:**
+  - The Mac slept during several runs (`pmset` confirmed), which stalled tests and left the Docker VM clock 52 s behind the host.
+  - That exposed that the queue **mixed clocks** (the app computed `next_attempt_at`, Postgres compared it with `now()`). Every queue time is now on the database clock: `rescheduleTask` takes a delay, D6.
+  - Long runs now use `caffeinate -i`.
+- 🔍 **The portal's documented slowness (> 5 s) finally showed up.** Tests that expect a status now treat a timeout as transient, like a 503.
+- ⚠️ **AI process slip:** one commit was made with a failing `npm run check` (formatting only), because the commands were chained with `;` instead of `&&`. Caught on re-reading the output and fixed in a separate commit (`545220e`).
