@@ -32,6 +32,7 @@ Commands (run from `service/`):
 
 Long portal-bound runs on this Mac: prefix them with `caffeinate -dims`. The Mac sleeps on battery, which stalls the tests and makes the Docker VM's clock drift (52 s were seen). `-i` alone did not prevent sleep in dark wake (lid closed or screen off); keep the Mac on power with the lid open for unattended runs.
 | `npm run test:e2e` | End-to-end tests (`test/e2e/`): the whole service against the real portal. |
+| `npm run test:alerts` | Behaviour tests of `ops/alerts.yml` with `promtool` (Docker image `prom/prometheus:v2.55.1`; needs Docker on `PATH`). |
 
 TypeScript is pinned to **5.9.x**: typescript-eslint supports TS < 6.1, so do not upgrade to TS 7.
 
@@ -42,6 +43,7 @@ TypeScript is pinned to **5.9.x**: typescript-eslint supports TS < 6.1, so do no
 - Layout (SPEC §3): production code in `src/`, **all tests in `test/`**, never next to the code.
   - `src/domain/{calendar,updates,retry}/` hold pure logic with no I/O; `src/portal/` holds the client and rate limiter; `src/db/` holds the migrations and `repository.ts`; `src/http/`, `src/worker/`, `src/metrics/`.
   - `test/unit/` mirrors `src/` (the test for `src/x/y.ts` is `test/unit/x/y.test.ts`); `test/integration/` and `test/e2e/` hold tests that need services; `test/support/` holds shared helpers.
+  - `ops/alerts.yml` holds the Prometheus alert rules: a unit test checks that every metric they reference exists, and `ops/alerts.test.yml` checks with `promtool` when they fire and stay quiet. Missing data must never read as healthy.
   - Tests import production code as `#src/...` (a Node subpath import), never with `../../src`. ESLint enforces both directions, and `test/unit/layout.test.ts` fails if a test file sits where no Vitest project would run it.
 - **No ORM.** All SQL lives in `db/repository.ts` (SPEC D8). Migrations are numbered `.sql` files in `db/migrations/`.
 - Inject time (`now()`) and randomness (jitter) into domain logic so tests are deterministic.
@@ -80,7 +82,7 @@ The agent is required to find at least 3 risks, so not every risk is a real prob
 - Branches so far and planned: `feature/setup`, `feature/core`, `refactor/structure`, `feature/api`, `feature/worker`, `feature/metrics`, `feature/e2e`, `docs/process`.
 - **Merged branches are never deleted** (locally or on GitHub): they are part of the visible process.
 - Small Conventional Commits (`feat:`, `test:`, `fix:`, `refactor:`, `docs:`, `chore:`), with a scope when useful (`feat(worker): …`). In TDD, the failing test and its implementation may be separate commits.
-- Integrate through GitHub PRs into `develop` (`gh pr create --base develop`). CI (`.github/workflows/ci.yml`) runs `npm run check` and, in a second job with PostgreSQL and **Portal Sol** services, `npm run test:integration` on every PR; both must be green. The user reviews and merges.
+- Integrate through GitHub PRs into `develop` (`gh pr create --base develop`). CI (`.github/workflows/ci.yml`) runs `npm run check`; in a second job with PostgreSQL and **Portal Sol** services, `npm run test:integration`; and in a third, the `promtool` checks and tests of the alert rules. All must be green on every PR. The user reviews and merges.
 - **PR descriptions are detailed** (in English), with these sections:
   1. **Summary**: what the block delivers and why. Link the SPEC sections and ACs it covers.
   2. **What's included**: changes grouped by area, naming the key files.

@@ -3,6 +3,7 @@ import { migrate } from './db/migrate.ts';
 import { createPool, waitForDatabase } from './db/pool.ts';
 import { DEFAULT_RETRY_POLICY } from './domain/retry/backoff.ts';
 import { buildApp } from './http/app.ts';
+import { createMetrics } from './metrics/registry.ts';
 import { createPortalClient } from './portal/client.ts';
 import { SlidingWindowRateLimiter } from './portal/rate-limiter.ts';
 import { createWorker, type Worker } from './worker/worker.ts';
@@ -22,10 +23,21 @@ try {
 // once the app exists (the pool must exist first, because the app depends on it).
 let logPoolError: (error: Error) => void = () => {};
 const pool = createPool(config.databaseUrl, { onError: (error) => logPoolError(error) });
+// One registry and one limiter, shared by the API (which exposes them) and the worker (SPEC §7, D5).
+const metrics = createMetrics();
+const limiter = new SlidingWindowRateLimiter({
+  limit: config.portal.maxRequestsPerMinute,
+  windowMs: 60_000,
+});
+let worker: Worker | undefined;
 const app = buildApp({
   pool,
   maxUpdateRangeDays: config.maxUpdateRangeDays,
   logger: { level: config.logLevel },
+  metrics,
+  timeoutSettleMs: config.portal.timeoutSettleMs,
+  ...(config.worker.enabled ? { limiter } : {}),
+  workerState: () => (worker ? worker.status() : 'disabled'),
 });
 const log = app.log;
 logPoolError = (error) =>
@@ -55,7 +67,6 @@ try {
 }
 
 // The worker shares the process with the API (SPEC §3) unless WORKER_ENABLED=false.
-let worker: Worker | undefined;
 if (config.worker.enabled) {
   worker = createWorker({
     pool,
@@ -65,10 +76,8 @@ if (config.worker.enabled) {
       timeoutMs: config.portal.timeoutMs,
     }),
     // One limiter for every slot: the portal's limit is global (SPEC D5).
-    limiter: new SlidingWindowRateLimiter({
-      limit: config.portal.maxRequestsPerMinute,
-      windowMs: 60_000,
-    }),
+    limiter,
+    metrics,
     log,
     concurrency: config.worker.concurrency,
     leaseMs: config.worker.leaseMs,

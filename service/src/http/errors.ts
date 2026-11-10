@@ -1,5 +1,6 @@
 import type { Socket } from 'node:net';
 import type { FastifyError, FastifyInstance } from 'fastify';
+import type { RejectionCode } from '../metrics/registry.ts';
 
 /** The one error shape of the API (SPEC §6), the same as Portal Sol's. */
 export const errorBody = (code: string, message: string) => ({ error: { code, message } });
@@ -42,7 +43,14 @@ export function isDatabaseUnavailable(error: unknown): boolean {
 }
 
 /** Maps every failure, including Fastify's own (parsing, limits, 404), to the error shape. */
-export function registerErrorHandling(app: FastifyInstance): void {
+/** Counts POST /updates that end without being accepted (415, 413, bad JSON, 503). */
+export function registerErrorHandling(
+  app: FastifyInstance,
+  rejected?: (code: RejectionCode) => void,
+): void {
+  const reject = (request: { method: string; url: string }, code: RejectionCode) => {
+    if (request.method === 'POST' && request.url.startsWith('/updates')) rejected?.(code);
+  };
   app.setNotFoundHandler((request, reply) =>
     reply
       .code(404)
@@ -51,18 +59,22 @@ export function registerErrorHandling(app: FastifyInstance): void {
 
   app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE') {
+      reject(request, 'UNSUPPORTED_MEDIA_TYPE');
       return reply
         .code(415)
         .send(errorBody('UNSUPPORTED_MEDIA_TYPE', 'Content-Type must be application/json'));
     }
     if (error.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
+      reject(request, 'PAYLOAD_TOO_LARGE');
       return reply.code(413).send(errorBody('PAYLOAD_TOO_LARGE', 'Body is larger than 1 MB'));
     }
     if (error.statusCode === 400) {
+      reject(request, 'INVALID_BODY');
       // Body problems from our JSON parser (accurate messages) or any other Fastify 400.
       return reply.code(400).send(errorBody('INVALID_BODY', error.message));
     }
     if (isDatabaseUnavailable(error)) {
+      reject(request, 'UNAVAILABLE');
       request.log.warn({ err: error }, 'database unavailable');
       return reply
         .code(503)

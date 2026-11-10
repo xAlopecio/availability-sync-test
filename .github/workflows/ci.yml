@@ -62,3 +62,13 @@ jobs:
       - name: wait for Portal Sol
         run: for i in $(seq 1 30); do curl -sf http://localhost:4000/health && exit 0; sleep 2; done; exit 1
       - run: npm run test:integration
+
+  alert-rules:
+    name: alert rules (promtool)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: check syntax
+        run: docker run --rm -v "$PWD/ops:/ops:ro" --entrypoint /bin/promtool prom/prometheus:v2.55.1 check rules /ops/alerts.yml
+      - name: behaviour tests
+        run: docker run --rm -v "$PWD/ops:/ops:ro" --entrypoint /bin/promtool prom/prometheus:v2.55.1 test rules /ops/alerts.test.yml

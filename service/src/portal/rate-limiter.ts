@@ -85,6 +85,12 @@ export class SlidingWindowRateLimiter {
     this.pauseUntil(this.#now() + ms);
   }
 
+  /** Request starts in the current window (for the metrics). */
+  windowStarts(): number {
+    const now = this.#now();
+    return this.#starts.filter((start) => start.at > now - this.#windowMs).length;
+  }
+
   /** How long the global pause still lasts, or 0. */
   pausedRemaining(): number {
     return Math.max(0, this.#pausedUntil - this.#now());

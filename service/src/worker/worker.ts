@@ -5,12 +5,14 @@ import {
   completeTask,
   failTask,
   rescheduleTask,
+  syncedUpdateLagMs,
   type ClaimedTask,
 } from '../db/queue.ts';
 import type { PortalClient } from '../portal/client.ts';
 import type { SlidingWindowRateLimiter } from '../portal/rate-limiter.ts';
 import { decideAttempt, type AttemptAction, type ObservedCall } from './decide.ts';
 import { sleepUnlessAborted } from './sleep.ts';
+import type { Metrics } from '../metrics/registry.ts';
 
 /** The subset of pino's API the worker logs with (Fastify's `app.log` satisfies it). */
 export type WorkerLog = {
@@ -42,6 +44,8 @@ export type WorkerOptions = {
   readonly random?: () => number;
   /** Standby instances retry the single-worker lock this often (SPEC D5). Default 5 s. */
   readonly leaderRetryMs?: number;
+  /** The service's metrics (SPEC §7); none if not given (tests). */
+  readonly metrics?: Metrics;
   /** Test hook: called right after a task is claimed, before it is sent. */
   readonly onClaimed?: (task: ClaimedTask) => void;
   /** Test hook: called after every attempt. */
@@ -52,6 +56,8 @@ export type Worker = {
   start(): void;
   /** Stops claiming, aborts waits, lets in-flight attempts finish and store their outcome. */
   stop(): Promise<void>;
+  /** `active` while holding the single-worker lock (SPEC D5), otherwise `standby`. */
+  status(): 'active' | 'standby';
 };
 
 /** SPEC D5: N slots, each acquire a permit → claim → send → decide → apply. */
@@ -108,6 +114,29 @@ export function createWorker(options: WorkerOptions): Worker {
     }
   }
 
+  /** SPEC §7 counters for an outcome that was stored (stale results are not counted). */
+  async function recordOutcome(
+    task: ClaimedTask,
+    action: AttemptAction,
+    failedCount: number,
+  ): Promise<void> {
+    const metrics = options.metrics!;
+    if (action.type === 'reschedule') metrics.recordRetry(action.outcome);
+    else if (action.type === 'fail') metrics.tasksFinished.inc({ result: 'failed' }, failedCount);
+    else {
+      metrics.tasksFinished.inc({ result: 'done' });
+      // Only the update's last chunk completes it: FIFO means its chunks never complete together.
+      // The task is already done: a failing lookup must not turn into a slot error (which would
+      // log a false "will be retried" and drop the attempt's own log line).
+      try {
+        const lagMs = await syncedUpdateLagMs(pool, task.updateId);
+        if (lagMs !== null) metrics.updateLag.observe(lagMs / 1000);
+      } catch (error) {
+        log.warn({ err: error, updateId: task.updateId }, 'could not compute the update lag');
+      }
+    }
+  }
+
   async function attempt(task: ClaimedTask): Promise<void> {
     options.onClaimed?.(task);
     // Another slot may have hit a 429 while this one was claiming: its permit predates the pause,
@@ -119,6 +148,7 @@ export function createWorker(options: WorkerOptions): Worker {
         error: 'deferred: rate-limit pause',
         httpStatus: null,
       });
+      options.metrics?.sendsDeferred.inc();
       log.info(
         { taskId: task.taskId, accommodationId: task.accommodationId, pausedMs },
         'send deferred: the rate limiter is paused',
@@ -141,11 +171,14 @@ export function createWorker(options: WorkerOptions): Worker {
       timeoutMs,
       policy: retry,
     });
+    options.metrics?.recordPortalCall(action.outcome, (endedAt - startedAt) / 1000);
     if (action.type === 'reschedule' && action.pauseForMs !== undefined) {
       limiter.pauseFor(action.pauseForMs); // every slot waits, not just this task (SPEC D4)
     }
 
     let applied: boolean;
+    let storeFailed = false;
+    let failedCount = 0;
     try {
       applied =
         action.type === 'complete'
@@ -157,15 +190,23 @@ export function createWorker(options: WorkerOptions): Worker {
                 httpStatus: action.httpStatus,
                 timedOut: action.outcome === 'timeout',
               })
-            : await failTask(pool, task, { error: action.error, httpStatus: action.httpStatus });
+            : (failedCount = await failTask(pool, task, {
+                error: action.error,
+                httpStatus: action.httpStatus,
+              })) > 0;
     } catch (error) {
       // The lease expires and the task is retried; re-sending is safe (idempotent PUT).
+      storeFailed = true;
       log.error(
         { err: error, taskId: task.taskId },
         'could not store the attempt outcome; the lease will expire',
       );
       applied = false;
     }
+
+    if (applied && options.metrics) await recordOutcome(task, action, failedCount);
+    // Not applied and not a store error: the fencing token was stale (another claim owns it).
+    if (!applied && !storeFailed) options.metrics?.staleResults.inc();
 
     const fields = {
       taskId: task.taskId,
@@ -192,6 +233,7 @@ export function createWorker(options: WorkerOptions): Worker {
   const LEADER_LOCK = 'SELECT pg_try_advisory_lock(2, 1) AS ok';
   const leaderRetryMs = options.leaderRetryMs ?? 5_000;
   let leadership: Promise<void> | undefined;
+  let active = false;
 
   /** Seeds the limiter with the attempts of the last minute, possibly by another process. */
   async function seedLimiter(): Promise<number> {
@@ -238,8 +280,13 @@ export function createWorker(options: WorkerOptions): Worker {
           );
           announcedStandby = false;
           const run = AbortSignal.any([stopping.signal, lost.signal]);
+          active = true;
           slots = Array.from({ length: concurrency }, (_, slot) => runSlot(slot, run));
-          await Promise.all(slots);
+          try {
+            await Promise.all(slots);
+          } finally {
+            active = false;
+          }
         }
       } catch (error) {
         log.error({ err: error }, 'worker leadership error; retrying');
@@ -261,5 +308,6 @@ export function createWorker(options: WorkerOptions): Worker {
       stopping.abort();
       await leadership;
     },
+    status: () => (active ? 'active' : 'standby'),
   };
 }

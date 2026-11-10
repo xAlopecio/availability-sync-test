@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { heldBySettle } from './queue-sql.ts';
 
 /** A task claimed by a worker slot, with everything needed to send it. */
 export type ClaimedTask = {
@@ -37,12 +38,7 @@ export async function claimTask(
           -- D9: not while an overlapping task of this accommodation timed out less than the settle
           -- window ago (its abandoned request may still be applied late). Evaluated here, at claim
           -- time, so updates accepted after that task completed are held too.
-          AND NOT EXISTS (
-                SELECT 1 FROM sync_tasks d
-                 WHERE d.accommodation_id = t.accommodation_id
-                   AND d.id <> t.id
-                   AND d.last_timeout_at > now() - make_interval(secs => $2::double precision / 1000)
-                   AND daterange(d.date_from, d.date_to, '[]') && daterange(t.date_from, t.date_to, '[]'))
+          AND NOT ${heldBySettle('t', '$2')}
         ORDER BY t.next_attempt_at, t.id
         LIMIT 1
         FOR UPDATE SKIP LOCKED
@@ -123,13 +119,14 @@ export async function rescheduleTask(
 
 /**
  * A permanent failure: the task and the pending siblings of its update fail together, in one
- * transaction (SPEC D4). Returns `false` if the token is stale.
+ * transaction (SPEC D4). Returns how many tasks failed (the task + its siblings), 0 if the token
+ * is stale.
  */
 export async function failTask(
   pool: pg.Pool,
   task: ClaimedTask,
   result: { error: string; httpStatus: number },
-): Promise<boolean> {
+): Promise<number> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -142,22 +139,37 @@ export async function failTask(
     );
     if (rowCount !== 1) {
       await client.query('ROLLBACK');
-      return false;
+      return 0;
     }
     // Siblings would fail the same way (dates are pre-validated); failing them now unblocks the
     // accommodation's next update. They are behind this task in the queue, so none is in flight.
-    await client.query(
+    const siblings = await client.query(
       `UPDATE sync_tasks
           SET status = 'failed', completed_at = now(), last_error = $2
         WHERE update_id = $1 AND status = 'pending' AND id <> $3`,
       [task.updateId, result.error, task.taskId],
     );
     await client.query('COMMIT');
-    return true;
+    return 1 + (siblings.rowCount ?? 0);
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     throw error;
   } finally {
     client.release();
   }
+}
+
+/** If every task of the update is done: milliseconds from acceptance to the last completion. */
+export async function syncedUpdateLagMs(pool: pg.Pool, updateId: number): Promise<number | null> {
+  const { rows } = await pool.query<{ lag_ms: number | null }>(
+    `SELECT CASE WHEN bool_and(t.status = 'done')
+                 THEN (extract(epoch FROM max(t.completed_at) - u.accepted_at) * 1000)::float8
+            END AS lag_ms
+       FROM sync_tasks t
+       JOIN updates u ON u.id = t.update_id
+      WHERE t.update_id = $1
+      GROUP BY u.accepted_at`,
+    [updateId],
+  );
+  return rows[0]?.lag_ms ?? null;
 }

@@ -1,0 +1,142 @@
+# Behaviour tests for alerts.yml, run with:
+#   promtool test rules alerts.test.yml      (via the prom/prometheus image: see service/package.json)
+# Each case feeds synthetic series and states which alerts must (and must not) fire.
+rule_files:
+  - alerts.yml
+evaluation_interval: 1m
+
+tests:
+  # A2: a restarted worker with ready tasks that never sends. The counter exists at 0 from start
+  # (label values are initialised), so rate() is 0, not an empty vector, and the alert can fire.
+  - name: A2 worker not sending after a restart
+    interval: 1m
+    input_series:
+      - series: 'sync_tasks_pending{state="ready",instance="a"}'
+        values: '3x15'
+      - series: 'portal_requests_total{outcome="success",instance="a"}'
+        values: '0x15'
+      - series: 'portal_rate_limiter_paused_seconds{instance="a"}'
+        values: '0x15'
+      - series: 'sync_worker_active{instance="a"}'
+        values: '1x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: WorkerNotSending
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: Tasks are ready to send but no portal call has been made for 5 minutes.
+
+  # A3: the same silence, but because a long Retry-After paused every send. That is by design:
+  # WorkerNotSending must stay quiet; RateLimiterPausedLong is the right (warning) signal.
+  - name: A3 a long Retry-After pause is not a wedged worker
+    interval: 1m
+    input_series:
+      - series: 'sync_tasks_pending{state="ready",instance="a"}'
+        values: '3x15'
+      - series: 'portal_requests_total{outcome="success",instance="a"}'
+        values: '0x15'
+      - series: 'portal_rate_limiter_paused_seconds{instance="a"}'
+        values: '600x15'
+      - series: 'sync_worker_active{instance="a"}'
+        values: '1x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: WorkerNotSending
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: RateLimiterPausedLong
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: Sends are paused for more than 5 minutes by a Retry-After.
+
+  # A4: the first permanent failure after a restart. The counter was 0 and jumps to 3 (the task
+  # and its siblings, D4): increase() sees it.
+  - name: A4 first permanent failure after a restart
+    interval: 1m
+    input_series:
+      - series: 'sync_tasks_finished_total{result="failed",instance="a"}'
+        values: '0 0 0 3 3 3 3 3'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PermanentFailures
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: Some updates failed permanently (400/404) and will not reach the portal.
+
+  # A4b: why label values are initialised. A series born directly at 3 has no increase() for
+  # Prometheus (its first sample is not an increase): the same failure would go unnoticed.
+  - name: A4b an unborn series hides the first failure (documents the reason for M5)
+    interval: 1m
+    input_series:
+      - series: 'sync_tasks_finished_total{result="failed",instance="a"}'
+        values: '_ _ _ 3 3 3 3 3'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PermanentFailures
+        exp_alerts: []
+
+  # A5: no instance exposes metrics at all (crashed, crash-looping, or not scraped). Missing data
+  # must not read as healthy.
+  - name: A5 the whole service is absent
+    interval: 1m
+    input_series:
+      - series: 'up{job="something-else"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ServiceMetricsAbsent
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: No instance of the sync service exposes metrics (down, crash-looping or not scraped).
+
+  # A6: a healthy steady state: nothing fires.
+  - name: A6 healthy steady state
+    interval: 1m
+    input_series:
+      - series: 'sync_worker_active{instance="a"}'
+        values: '1x25'
+      - series: 'sync_metrics_db_up{instance="a"}'
+        values: '1x25'
+      - series: 'sync_queue_state_age_seconds{instance="a"}'
+        values: '0x25'
+      - series: 'sync_oldest_pending_task_age_seconds{instance="a"}'
+        values: '5x25'
+      - series: 'sync_stuck_heads{min_attempts="10",instance="a"}'
+        values: '0x25'
+      - series: 'sync_tasks_pending{state="ready",instance="a"}'
+        values: '1x25'
+      - series: 'sync_tasks_pending{state="held_settle",instance="a"}'
+        values: '0x25'
+      - series: 'portal_requests_total{outcome="success",instance="a"}'
+        values: '0+10x25'
+      - series: 'portal_requests_total{outcome="unavailable",instance="a"}'
+        values: '0+3x25'
+      - series: 'portal_requests_total{outcome="unauthorized",instance="a"}'
+        values: '0x25'
+      - series: 'portal_requests_total{outcome="rate_limited",instance="a"}'
+        values: '0x25'
+      - series: 'portal_requests_total{outcome="unexpected_status",instance="a"}'
+        values: '0x25'
+      - series: 'sync_tasks_finished_total{result="failed",instance="a"}'
+        values: '0x25'
+      - series: 'portal_rate_limiter_paused_seconds{instance="a"}'
+        values: '0x25'
+    alert_rule_test:
+      - { eval_time: 20m, alertname: SyncStuck, exp_alerts: [] }
+      - { eval_time: 20m, alertname: NoActiveWorker, exp_alerts: [] }
+      - { eval_time: 20m, alertname: ServiceMetricsAbsent, exp_alerts: [] }
+      - { eval_time: 20m, alertname: WorkerNotSending, exp_alerts: [] }
+      - { eval_time: 20m, alertname: PortalBadCredentials, exp_alerts: [] }
+      - { eval_time: 20m, alertname: MetricsCannotReadDatabase, exp_alerts: [] }
+      - { eval_time: 20m, alertname: QueueGaugesStale, exp_alerts: [] }
+      - { eval_time: 20m, alertname: StuckAccommodation, exp_alerts: [] }
+      - { eval_time: 20m, alertname: PortalDegraded, exp_alerts: [] }
+      - { eval_time: 20m, alertname: UnexpectedThrottling, exp_alerts: [] }
+      - { eval_time: 20m, alertname: RateLimiterPausedLong, exp_alerts: [] }
+      - { eval_time: 20m, alertname: UnexpectedPortalResponses, exp_alerts: [] }
+      - { eval_time: 20m, alertname: PermanentFailures, exp_alerts: [] }
+      - { eval_time: 20m, alertname: SettleHoldsPersisting, exp_alerts: [] }
