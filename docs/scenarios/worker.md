@@ -66,6 +66,8 @@ The claim query of SPEC D6 plus the three outcomes. Each claim returns a **fenci
 | Q12 / D9 | `reschedule` after a **timeout** — *added after L6 exposed late application* | Records `last_timeout_at`; other outcomes do not |
 | Q13 / D9 | `complete` of a task that had a timeout — *added after L6* | The accommodation's next pending tasks are not due before `last_timeout_at + settle`; other accommodations are unaffected; a task without a timeout delays nothing |
 | Q14 / D6 | `reschedule` takes a **delay** applied on the database clock — *added after the Docker VM clock drifted 52 s behind the host (Mac sleep), which delayed every retry by 52 s* | `next_attempt_at − DB now() ≈ delay`, whatever the app's clock says |
+| Q15 / D9 | Update B, overlapping A, is accepted **after** A (which timed out) has completed — *added after the worker review: the first hold only touched tasks already queued (R1, the review's root risk)* | B is not claimable until A's `last_timeout_at + settle` |
+| Q16 / D9 | The accommodation's next task does **not** overlap the timed-out one — *added after the review* | Claimable at once: only overlapping days can be overwritten by a late write |
 
 ## 4. Rate limiter additions — `src/portal/rate-limiter.ts` (U)
 
@@ -73,6 +75,8 @@ The claim query of SPEC D6 plus the three outcomes. Each claim returns a **fenci
 |---|---|---|
 | R12 | `release()` returns the most recent permit (a claim found nothing, see Q1) | The window has room again |
 | R13 | `acquire({ signal })` aborted while waiting (shutdown) | Rejects with an `AbortError` promptly; takes no permit |
+| R14 | `release(token)` frees **that** permit, not the most recent one — *added after the review: popping another slot's start could allow N+1 in a window* | Only the releasing slot's start leaves the window |
+| R15 | `seed(agesMs)` records starts that happened before this process (read from the database) — *added after the review* | They occupy the window until they age out |
 
 ## 5. Worker loop — `src/worker/worker.ts` (I-portal unless stated)
 
@@ -91,6 +95,11 @@ The claim query of SPEC D6 plus the three outcomes. Each claim returns a **fenci
 | L9 | `stop()` while slots are waiting for a permit and one request is in flight | Waiting slots stop promptly (abort); the in-flight request finishes and its outcome is stored; `stop()` resolves; no claim afterwards |
 | L10 (I-db + fake client) | An idle worker with an empty queue for several poll intervals | **Consumes no permits** (the limiter still has its full window); no portal calls |
 | L11 (I-db + fake client) | Every attempt is logged | JSON line with `taskId`, `updateId`, `accommodationId`, `attempt`, `outcome`, `httpStatus`, `durationMs`, `nextAttemptAt` (SPEC §7); retries at `warn`, permanent failures at `error` |
+| L12 (I-db + fake client) | The client throws unexpectedly — *added after the review: it was an unhandled rejection that killed the process* | Logged at `error` with the task; the lease expires and the task is retried; the loop keeps going |
+| L13 (I-db + fake client) | The global pause starts between a slot's claim and its send (another slot's 429) — *added after the review* | No portal call; the task is rescheduled for the rest of the pause |
+| L14 (unit) | Idle polling for many cycles — *added after the review: each pause leaked an abort listener (~280 MB/day idle)* | The stop signal holds no listeners after the sleeps end |
+| WK1 (I-db + fake client) | Two workers on one database — *added after the review* | Only one sends; when it stops, the standby takes over |
+| WK2 (I-db + fake client) | A restart right after the previous process used the window (recent `last_attempt_at` in the DB) | The new worker's limiter starts full: it waits for those starts to age out |
 | L6 note / D9 | L6 failed intermittently: a timed-out PUT was applied **after** the next update (reproduced outside the tests, 1 in 14). With the settle window it must converge on every run. *A 3 s test window still failed once in five runs: diagnostics showed a late write landing ≥ 5 s after we gave up (an abandoned PUT is applied later, or never: 3 of 25). The test window is now 15 s (production: 30 s); 8 out of 8 runs and repeated full-suite runs passed.* Worker tests also wait for the portal to go quiet before the next test's reset, because timed-out requests from one test could still be in flight in the next |
 
 ## 6. Wiring — `src/main.ts` (I-portal)
