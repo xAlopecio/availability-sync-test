@@ -123,13 +123,14 @@ export async function rescheduleTask(
 
 /**
  * A permanent failure: the task and the pending siblings of its update fail together, in one
- * transaction (SPEC D4). Returns `false` if the token is stale.
+ * transaction (SPEC D4). Returns how many tasks failed (the task + its siblings), 0 if the token
+ * is stale.
  */
 export async function failTask(
   pool: pg.Pool,
   task: ClaimedTask,
   result: { error: string; httpStatus: number },
-): Promise<boolean> {
+): Promise<number> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -142,7 +143,7 @@ export async function failTask(
     );
     if (rowCount !== 1) {
       await client.query('ROLLBACK');
-      return false;
+      return 0;
     }
     // Siblings would fail the same way (dates are pre-validated); failing them now unblocks the
     // accommodation's next update. They are behind this task in the queue, so none is in flight.
@@ -153,11 +154,16 @@ export async function failTask(
       [task.updateId, result.error, task.taskId],
     );
     await client.query('COMMIT');
-    return true;
+    return 1; // stub: does not count the siblings yet
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     throw error;
   } finally {
     client.release();
   }
+}
+
+/** If every task of the update is done: milliseconds from acceptance to the last completion. */
+export async function syncedUpdateLagMs(_pool: pg.Pool, _updateId: number): Promise<number | null> {
+  throw new Error('not implemented');
 }

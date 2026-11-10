@@ -11,6 +11,7 @@ import type { PortalClient } from '../portal/client.ts';
 import type { SlidingWindowRateLimiter } from '../portal/rate-limiter.ts';
 import { decideAttempt, type AttemptAction, type ObservedCall } from './decide.ts';
 import { sleepUnlessAborted } from './sleep.ts';
+import type { Metrics } from '../metrics/registry.ts';
 
 /** The subset of pino's API the worker logs with (Fastify's `app.log` satisfies it). */
 export type WorkerLog = {
@@ -42,6 +43,8 @@ export type WorkerOptions = {
   readonly random?: () => number;
   /** Standby instances retry the single-worker lock this often (SPEC D5). Default 5 s. */
   readonly leaderRetryMs?: number;
+  /** The service's metrics (SPEC §7); none if not given (tests). */
+  readonly metrics?: Metrics;
   /** Test hook: called right after a task is claimed, before it is sent. */
   readonly onClaimed?: (task: ClaimedTask) => void;
   /** Test hook: called after every attempt. */
@@ -52,6 +55,8 @@ export type Worker = {
   start(): void;
   /** Stops claiming, aborts waits, lets in-flight attempts finish and store their outcome. */
   stop(): Promise<void>;
+  /** `active` while holding the single-worker lock (SPEC D5), otherwise `standby`. */
+  status(): 'active' | 'standby';
 };
 
 /** SPEC D5: N slots, each acquire a permit → claim → send → decide → apply. */
@@ -157,7 +162,8 @@ export function createWorker(options: WorkerOptions): Worker {
                 httpStatus: action.httpStatus,
                 timedOut: action.outcome === 'timeout',
               })
-            : await failTask(pool, task, { error: action.error, httpStatus: action.httpStatus });
+            : (await failTask(pool, task, { error: action.error, httpStatus: action.httpStatus })) >
+              0;
     } catch (error) {
       // The lease expires and the task is retried; re-sending is safe (idempotent PUT).
       log.error(
@@ -261,5 +267,6 @@ export function createWorker(options: WorkerOptions): Worker {
       stopping.abort();
       await leadership;
     },
+    status: () => 'standby', // stub
   };
 }

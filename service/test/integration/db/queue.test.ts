@@ -192,7 +192,7 @@ describe('completeTask / rescheduleTask / failTask', () => {
     expect(await completeTask(db.pool(), first, { httpStatus: 200 })).toBe(true);
     const second = (await claim())!; // chunk 1
     const error = '404 NOT_FOUND: Accommodation acc-1003 not found';
-    expect(await failTask(db.pool(), second, { error, httpStatus: 404 })).toBe(true);
+    expect(await failTask(db.pool(), second, { error, httpStatus: 404 })).toBe(2); // the task + 1 pending sibling
     expect((await tasksOf(failing)).map((t) => [t.status, t.last_error])).toEqual([
       ['done', null],
       ['failed', error],
@@ -211,7 +211,7 @@ describe('completeTask / rescheduleTask / failTask', () => {
     expect(
       await rescheduleTask(db.pool(), stale, { delayMs: 0, error: 'x', httpStatus: 503 }),
     ).toBe(false);
-    expect(await failTask(db.pool(), stale, { error: 'x', httpStatus: 404 })).toBe(false);
+    expect(await failTask(db.pool(), stale, { error: 'x', httpStatus: 404 })).toBe(0);
     expect((await task(current.taskId)).status).toBe('pending');
     expect(await completeTask(db.pool(), current, { httpStatus: 200 })).toBe(true);
   });
