@@ -34,14 +34,16 @@ export function buildApp(deps: AppDependencies): FastifyInstance {
   // Only JSON is accepted: without this, Fastify would parse text/plain bodies too (SPEC §6, 415).
   app.removeContentTypeParser('text/plain');
   registerJsonBodyParser(app);
-  registerErrorHandling(app);
-  registerUpdateRoutes(app, deps);
+  const metrics = deps.metrics ?? createMetrics();
+  registerErrorHandling(app, metrics.updatesRejected);
+  registerUpdateRoutes(app, { ...deps, metrics });
   registerSyncStatusRoutes(app, deps);
   registerObservabilityRoutes(app, {
     pool: deps.pool,
-    metrics: deps.metrics ?? createMetrics(),
+    metrics,
     workerState: deps.workerState ?? (() => 'disabled'),
     settleMs: deps.timeoutSettleMs ?? 30_000,
+    ...(deps.limiter ? { limiter: deps.limiter } : {}),
   });
   return app;
 }

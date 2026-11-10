@@ -147,14 +147,14 @@ export async function failTask(
     }
     // Siblings would fail the same way (dates are pre-validated); failing them now unblocks the
     // accommodation's next update. They are behind this task in the queue, so none is in flight.
-    await client.query(
+    const siblings = await client.query(
       `UPDATE sync_tasks
           SET status = 'failed', completed_at = now(), last_error = $2
         WHERE update_id = $1 AND status = 'pending' AND id <> $3`,
       [task.updateId, result.error, task.taskId],
     );
     await client.query('COMMIT');
-    return 1; // stub: does not count the siblings yet
+    return 1 + (siblings.rowCount ?? 0);
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     throw error;
@@ -164,6 +164,16 @@ export async function failTask(
 }
 
 /** If every task of the update is done: milliseconds from acceptance to the last completion. */
-export async function syncedUpdateLagMs(_pool: pg.Pool, _updateId: number): Promise<number | null> {
-  throw new Error('not implemented');
+export async function syncedUpdateLagMs(pool: pg.Pool, updateId: number): Promise<number | null> {
+  const { rows } = await pool.query<{ lag_ms: number | null }>(
+    `SELECT CASE WHEN bool_and(t.status = 'done')
+                 THEN (extract(epoch FROM max(t.completed_at) - u.accepted_at) * 1000)::float8
+            END AS lag_ms
+       FROM sync_tasks t
+       JOIN updates u ON u.id = t.update_id
+      WHERE t.update_id = $1
+      GROUP BY u.accepted_at`,
+    [updateId],
+  );
+  return rows[0]?.lag_ms ?? null;
 }

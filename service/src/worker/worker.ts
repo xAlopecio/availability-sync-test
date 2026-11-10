@@ -5,6 +5,7 @@ import {
   completeTask,
   failTask,
   rescheduleTask,
+  syncedUpdateLagMs,
   type ClaimedTask,
 } from '../db/queue.ts';
 import type { PortalClient } from '../portal/client.ts';
@@ -113,6 +114,23 @@ export function createWorker(options: WorkerOptions): Worker {
     }
   }
 
+  /** SPEC §7 counters for an outcome that was stored (stale results are not counted). */
+  async function recordOutcome(
+    task: ClaimedTask,
+    action: AttemptAction,
+    failedCount: number,
+  ): Promise<void> {
+    const metrics = options.metrics!;
+    if (action.type === 'reschedule') metrics.recordRetry(action.outcome);
+    else if (action.type === 'fail') metrics.tasksFinished.inc({ result: 'failed' }, failedCount);
+    else {
+      metrics.tasksFinished.inc({ result: 'done' });
+      // Only the update's last chunk completes it: FIFO means its chunks never complete together.
+      const lagMs = await syncedUpdateLagMs(pool, task.updateId);
+      if (lagMs !== null) metrics.updateLag.observe(lagMs / 1000);
+    }
+  }
+
   async function attempt(task: ClaimedTask): Promise<void> {
     options.onClaimed?.(task);
     // Another slot may have hit a 429 while this one was claiming: its permit predates the pause,
@@ -124,6 +142,7 @@ export function createWorker(options: WorkerOptions): Worker {
         error: 'deferred: rate-limit pause',
         httpStatus: null,
       });
+      options.metrics?.sendsDeferred.inc();
       log.info(
         { taskId: task.taskId, accommodationId: task.accommodationId, pausedMs },
         'send deferred: the rate limiter is paused',
@@ -146,11 +165,13 @@ export function createWorker(options: WorkerOptions): Worker {
       timeoutMs,
       policy: retry,
     });
+    options.metrics?.recordPortalCall(action.outcome, (endedAt - startedAt) / 1000);
     if (action.type === 'reschedule' && action.pauseForMs !== undefined) {
       limiter.pauseFor(action.pauseForMs); // every slot waits, not just this task (SPEC D4)
     }
 
     let applied: boolean;
+    let failedCount = 0;
     try {
       applied =
         action.type === 'complete'
@@ -162,8 +183,10 @@ export function createWorker(options: WorkerOptions): Worker {
                 httpStatus: action.httpStatus,
                 timedOut: action.outcome === 'timeout',
               })
-            : (await failTask(pool, task, { error: action.error, httpStatus: action.httpStatus })) >
-              0;
+            : (failedCount = await failTask(pool, task, {
+                error: action.error,
+                httpStatus: action.httpStatus,
+              })) > 0;
     } catch (error) {
       // The lease expires and the task is retried; re-sending is safe (idempotent PUT).
       log.error(
@@ -172,6 +195,8 @@ export function createWorker(options: WorkerOptions): Worker {
       );
       applied = false;
     }
+
+    if (applied && options.metrics) await recordOutcome(task, action, failedCount);
 
     const fields = {
       taskId: task.taskId,
@@ -198,6 +223,7 @@ export function createWorker(options: WorkerOptions): Worker {
   const LEADER_LOCK = 'SELECT pg_try_advisory_lock(2, 1) AS ok';
   const leaderRetryMs = options.leaderRetryMs ?? 5_000;
   let leadership: Promise<void> | undefined;
+  let active = false;
 
   /** Seeds the limiter with the attempts of the last minute, possibly by another process. */
   async function seedLimiter(): Promise<number> {
@@ -244,8 +270,13 @@ export function createWorker(options: WorkerOptions): Worker {
           );
           announcedStandby = false;
           const run = AbortSignal.any([stopping.signal, lost.signal]);
+          active = true;
           slots = Array.from({ length: concurrency }, (_, slot) => runSlot(slot, run));
-          await Promise.all(slots);
+          try {
+            await Promise.all(slots);
+          } finally {
+            active = false;
+          }
         }
       } catch (error) {
         log.error({ err: error }, 'worker leadership error; retrying');
@@ -267,6 +298,6 @@ export function createWorker(options: WorkerOptions): Worker {
       stopping.abort();
       await leadership;
     },
-    status: () => 'standby', // stub
+    status: () => (active ? 'active' : 'standby'),
   };
 }

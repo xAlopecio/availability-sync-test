@@ -42,7 +42,13 @@ export function isDatabaseUnavailable(error: unknown): boolean {
 }
 
 /** Maps every failure, including Fastify's own (parsing, limits, 404), to the error shape. */
-export function registerErrorHandling(app: FastifyInstance): void {
+/** Rejections of POST /updates that Fastify raises before the route runs (415, 413, bad JSON). */
+export type RejectionCounter = { inc(labels: { code: string }): void };
+
+export function registerErrorHandling(app: FastifyInstance, rejected?: RejectionCounter): void {
+  const reject = (request: { method: string; url: string }, code: string) => {
+    if (request.method === 'POST' && request.url.startsWith('/updates')) rejected?.inc({ code });
+  };
   app.setNotFoundHandler((request, reply) =>
     reply
       .code(404)
@@ -51,14 +57,17 @@ export function registerErrorHandling(app: FastifyInstance): void {
 
   app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE') {
+      reject(request, 'UNSUPPORTED_MEDIA_TYPE');
       return reply
         .code(415)
         .send(errorBody('UNSUPPORTED_MEDIA_TYPE', 'Content-Type must be application/json'));
     }
     if (error.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
+      reject(request, 'PAYLOAD_TOO_LARGE');
       return reply.code(413).send(errorBody('PAYLOAD_TOO_LARGE', 'Body is larger than 1 MB'));
     }
     if (error.statusCode === 400) {
+      reject(request, 'INVALID_BODY');
       // Body problems from our JSON parser (accurate messages) or any other Fastify 400.
       return reply.code(400).send(errorBody('INVALID_BODY', error.message));
     }

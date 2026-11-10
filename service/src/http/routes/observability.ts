@@ -15,9 +15,14 @@ export function registerObservabilityRoutes(
     readonly workerState: () => WorkerState;
     /** D9 settle window, to classify held tasks the way the claim does. */
     readonly settleMs: number;
+    readonly limiter?: { pausedRemaining(): number; windowStarts(): number };
   },
 ): void {
   app.get('/metrics', async (request, reply) => {
+    const { metrics } = deps;
+    metrics.workerActive.set(deps.workerState() === 'active' ? 1 : 0);
+    metrics.limiterPausedSeconds.set((deps.limiter?.pausedRemaining() ?? 0) / 1000);
+    metrics.limiterWindowStarts.set(deps.limiter?.windowStarts() ?? 0);
     let state: QueueState | null = null;
     try {
       state = await readQueueState(deps.pool, deps.settleMs);
