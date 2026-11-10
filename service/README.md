@@ -98,16 +98,18 @@ npm run check               # typecheck + lint + format check + unit tests
 
 Integration and e2e tests are slow by nature (the portal allows 30 requests per minute), so scenarios are kept small. Because the portal's 503s are random, test timeouts are generous.
 
+The tests use `localhost:5432` (PostgreSQL, `sync`/`sync`) and `localhost:4000` (Portal Sol) by default, as started by `docker compose`; set `TEST_DATABASE_SERVER_URL` and `TEST_PORTAL_URL` to point them elsewhere. Each test creates and drops its own `sync_test*` databases.
+
 CI (`.github/workflows/ci.yml`) runs four jobs on every PR: `check`; the integration suite and the e2e suite, each against its own PostgreSQL and Portal Sol; and the alert-rule tests.
 
 The test scenarios, written and approved before each block's tests, are in [`../docs/scenarios/`](../docs/scenarios/). Each test names the scenario or acceptance criterion it covers.
 
 ## Measured behaviour
 
-The e2e load test (L1/L2, `base` portal variant) sends 50 concurrent updates over 10 accommodations. That is 58 tasks, because some updates span more than 31 days. It ends with every update `synced`, the portal state correct, no `429`, and at most 26 portal requests in any 60 s window:
+From the e2e run reported in PR #8 (`base` portal variant): the load test (L1/L2) sends 50 concurrent updates over 10 accommodations. That is 58 tasks, because some updates span more than 31 days. It ends with every update `synced`, the portal state correct, no `429`, and at most 26 portal requests in any 60 s window:
 
 | Portal calls | 503 share | Wall time | Updates/min | Lag p50 / p95 |
 | ------------ | --------- | --------- | ----------- | ------------- |
 | 73           | 16 %      | 2.6 min   | 18.9        | 63 s / 130 s  |
 
-Throughput is bound by the portal's limit (25/min client-side, below its 30), not by the service. The lag is the time from acceptance to the last chunk synced.
+Throughput is bound by the portal's limit (25/min client-side, below its 30), not by the service. The 26 is not a limiter breach: the limiter counts requests as they leave and the portal as they arrive, so latency jitter can fit one more into the portal's 60 s window; the test asserts the portal's limit (≤ 30). The lag is the time from acceptance to the last chunk synced.
