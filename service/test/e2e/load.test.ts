@@ -70,10 +70,11 @@ describe('load, black box', () => {
     const statuses = await waitAllSettled(e2e.baseUrl, ACCOMMODATIONS, budgetMs);
     const elapsedMin = (Date.now() - started) / 60_000;
 
+    // The service's traffic, snapshotted before the test's own GETs (they count toward the limit).
+    const log = (await portalRequests()).filter((r) => r.path.startsWith('/api/'));
     for (const s of statuses) expect(s.body.status).toBe('synced');
     for (const acc of ACCOMMODATIONS) expect(await portalMismatches(accepted, acc)).toEqual([]);
 
-    const log = (await portalRequests()).filter((r) => r.path.startsWith('/api/'));
     const puts = log.filter((r) => r.method === 'PUT');
     expect(log.filter((r) => r.status === 429)).toEqual([]);
     expect(maxPerMinute(log)).toBeLessThanOrEqual(30);

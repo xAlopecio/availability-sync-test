@@ -40,17 +40,27 @@ export async function retryOn503<T extends { status: number }>(call: () => Promi
   throw new Error('portal answered 503 twenty times in a row');
 }
 
-/** The portal's day-by-day state (rate-limited: one request, retried on 503). */
+/**
+ * The portal's day-by-day state. The GET counts toward the portal's rate limit like any PUT, so
+ * a test that reads many accommodations right after a burst can get a 429: it waits the
+ * `Retry-After` and tries again (found by the e2e load test). Retried on 503.
+ */
 export async function portalDays(
   accommodationId: string,
   from: string,
   to: string,
 ): Promise<PortalDay[]> {
-  const res = await retryOn503(() =>
-    fetch(`${PORTAL_URL}/api/v1/accommodations/${accommodationId}?from=${from}&to=${to}`, {
-      headers: { 'X-Api-Key': PORTAL_API_KEY },
-    }),
-  );
+  let res: Response;
+  for (let i = 0; ; i++) {
+    res = await retryOn503(() =>
+      fetch(`${PORTAL_URL}/api/v1/accommodations/${accommodationId}?from=${from}&to=${to}`, {
+        headers: { 'X-Api-Key': PORTAL_API_KEY },
+      }),
+    );
+    if (res.status !== 429 || i >= 5) break;
+    const seconds = Number(res.headers.get('retry-after') ?? 60);
+    await new Promise((resolve) => setTimeout(resolve, seconds * 1000 + 500));
+  }
   if (!res.ok) throw new Error(`portal GET failed: ${res.status} ${await res.text()}`);
   return ((await res.json()) as { days: PortalDay[] }).days;
 }

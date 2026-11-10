@@ -258,10 +258,10 @@ describe('the service as a black box', () => {
     );
     const accs = changes.map((c) => c.accommodationId);
     const statuses = await waitAllSettled(standby.baseUrl, accs, 180_000);
+    // The services' traffic, snapshotted before the test's own GETs (they count toward the limit).
+    const log = (await portalRequests()).filter((r) => r.path.startsWith('/api/'));
     for (const s of statuses) expect(s.body.status).toBe('synced');
     for (const acc of accs) expect(await portalMismatches(changes, acc)).toEqual([]);
-    expect(
-      maxPerMinute((await portalRequests()).filter((r) => r.path.startsWith('/api/'))),
-    ).toBeLessThanOrEqual(30);
+    expect(maxPerMinute(log)).toBeLessThanOrEqual(30);
   });
 });
