@@ -4,7 +4,8 @@ import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
 
-// Basic, non type-aware rules on purpose: catch real mistakes, leave style to Prettier.
+// Basic rules on purpose: catch real mistakes, leave style to Prettier. One type-aware rule
+// for production code: a promise that is neither awaited nor handled (core review, worker block).
 export default tseslint.config(
   { ignores: ['node_modules/**', 'coverage/**'] },
   js.configs.recommended,
@@ -50,6 +51,11 @@ export default tseslint.config(
     // Tests may print diagnostics for intermittent failures; production code must use the logger.
     files: ['test/**/*.ts'],
     rules: { 'no-console': 'off' },
+  },
+  {
+    files: ['src/**/*.ts'],
+    languageOptions: { parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname } },
+    rules: { '@typescript-eslint/no-floating-promises': 'error' },
   },
   prettier,
 );
