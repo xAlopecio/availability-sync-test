@@ -68,6 +68,7 @@ The claim query of SPEC D6 plus the three outcomes. Each claim returns a **fenci
 | Q14 / D6 | `reschedule` takes a **delay** applied on the database clock — *added after the Docker VM clock drifted 52 s behind the host (Mac sleep), which delayed every retry by 52 s* | `next_attempt_at − DB now() ≈ delay`, whatever the app's clock says |
 | Q15 / D9 | Update B, overlapping A, is accepted **after** A (which timed out) has completed — *added after the worker review: the first hold only touched tasks already queued (R1, the review's root risk)* | B is not claimable until A's `last_timeout_at + settle` |
 | Q16 / D9 | The accommodation's next task does **not** overlap the timed-out one — *added after the review* | Claimable at once: only overlapping days can be overwritten by a late write |
+| Q17 / D9 | Re-claiming a task whose lease expired with no stored outcome (its process died mid-request) — *added after the e2e E3 found it: the abandoned PUT landed after the next update* | Treated like a timeout: `last_timeout_at` is set, so overlapping successors wait for the settle window |
 
 ## 4. Rate limiter additions — `src/portal/rate-limiter.ts` (U)
 

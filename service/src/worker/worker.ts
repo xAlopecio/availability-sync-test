@@ -99,6 +99,13 @@ export function createWorker(options: WorkerOptions): Worker {
         await pause(pollMs, signal);
         continue;
       }
+      if (task.reclaimed) {
+        options.metrics?.reclaimedTasks.inc();
+        log.warn(
+          { updateId: task.updateId, taskId: task.taskId, attempt: task.attempt },
+          'task re-claimed after its lease expired with no outcome; overlapping updates wait for the settle window',
+        );
+      }
       // Not aborted by stop(): an in-flight attempt finishes and its outcome is stored.
       try {
         await attempt(task);

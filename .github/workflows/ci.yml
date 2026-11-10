@@ -63,6 +63,47 @@ jobs:
         run: for i in $(seq 1 30); do curl -sf http://localhost:4000/health && exit 0; sleep 2; done; exit 1
       - run: npm run test:integration
 
+  e2e:
+    # Its own runner, so its own Portal Sol: the two suites never share the rate limit.
+    name: end-to-end tests (the service as a black box)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      portal-sol:
+        image: ghcr.io/avantio/portal-sol:latest
+        ports:
+          - 4000:4000
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: sync
+          POSTGRES_PASSWORD: sync
+          POSTGRES_DB: sync
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sync -d sync"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: service
+    env:
+      TEST_DATABASE_SERVER_URL: postgres://sync:sync@localhost:5432
+      TEST_PORTAL_URL: http://localhost:4000
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: service/package-lock.json
+      - run: npm ci
+      - name: wait for Portal Sol
+        run: for i in $(seq 1 30); do curl -sf http://localhost:4000/health && exit 0; sleep 2; done; exit 1
+      - run: npm run test:e2e
+
   alert-rules:
     name: alert rules (promtool)
     runs-on: ubuntu-latest
