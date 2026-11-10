@@ -178,3 +178,11 @@ Legend: 🤖 delegated to the AI · 👤 decided or done by the author · ⚠️
     - stale results and 503s are counted (W9, W11);
     - rejection codes are typed.
   - Accepted: SyncStuck and StuckAccommodation overlap in severity; one extra lag query per completion.
+
+## Phase 7 — End to end (`feature/e2e`)
+
+- 🤖 Drafted the black-box scenarios (`docs/scenarios/e2e.md`: flows E1–E9, load L1/L2) with 5 questions. 👤 Approved them all: SPEC v8 (AC14 load, AC15 lifecycle). Strict black box: assertions only through the service's HTTP API, `/metrics` and the real portal.
+- 🔍 **The e2e suite found a real bug on its first run (7 of 8 flows passed).** E3 (`SIGKILL` mid-sync) ended with two days holding the *older* value (`201`, want `301`). Every earlier block had tested the lease expiry from the inside, but never with a process that dies **while its PUT is in flight**.
+  - Cause: a dead process stores no outcome, so no `last_timeout_at` is recorded and D9 never holds the overlapping successor. The next process re-claims after the lease, sends `201` and then `301`, and the dead process's original `201` can still land after both, exactly the late write D9 exists for.
+  - Fix (`acf4cb4` red, `45af542` green): a re-claim of a lease that expired with no outcome records `last_timeout_at`, so a crash counts as a timeout. Integration test Q17 covers it, the D9 text in SPEC v8 is updated, and E1–E9 then passed twice in a row.
+  - Lesson: the internal tests checked each mechanism against what the code *knew*. Only a real process kill showed what the portal could still receive.
